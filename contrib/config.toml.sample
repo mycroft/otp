@@ -1,0 +1,31 @@
+# Sample otp configuration.
+# Copy to ~/.config/otp/config.toml (or point $OTP_CONFIG at it).
+# Every key is optional; the values below are the defaults unless noted.
+
+# Default store, as if --pass ("pass") or --native ("database") were given to
+# every command; the flags still override it. Unset: look in both stores and
+# insert into the database.
+#backend = "pass"
+
+# Native encrypted database. $OTP_DB takes precedence.
+database = "~/.local/share/otp/otp.db"
+
+# Command printing the master password on its first stdout line, to avoid
+# being prompted on every use. No default: otp prompts when unset.
+# $OTP_PASSWORD takes precedence.
+#password_command = ["pass", "show", "otp/master"]
+
+# Screenshot command used by `otp insert --qrcode`.
+# {file} is replaced by the PNG path to write; if absent, the path is appended.
+capture_command = ["grimshot", "save", "area", "{file}"]
+# Other examples:
+#capture_command = ["sh", "-c", "grim -g \"$(slurp)\" {file}"]
+#capture_command = ["scrot", "--select", "{file}"]
+#capture_command = ["spectacle", "--region", "--background", "--nonotify", "--output", "{file}"]
+
+# Command receiving the code on stdin for `otp --clip`.
+clipboard_command = ["wl-copy"]
+#clipboard_command = ["xclip", "-selection", "clipboard"]
+
+# pass(1) store directory. Default: $PASSWORD_STORE_DIR or ~/.password-store.
+#password_store_dir = "~/.password-store"

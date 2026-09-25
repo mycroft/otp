@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/otp-core", "crates/otp-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Argon2 is unbearably slow unoptimized; keep debug builds and tests responsive.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

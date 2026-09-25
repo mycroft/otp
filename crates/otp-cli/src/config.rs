@@ -17,6 +17,9 @@ pub struct Config {
     pub password_command: Option<Vec<String>>,
     /// Screenshot command for `insert --qrcode`; `{file}` is the PNG path to write.
     pub capture_command: Vec<String>,
+    /// Viewer for `otp --qrcode NAME`, given a PNG as `{file}`, e.g. `["chafa", "{file}"]`.
+    /// Unset: the QR code is drawn in the terminal.
+    pub qrcode_viewer_command: Option<Vec<String>>,
     /// Command receiving the code on stdin for `--clip`.
     pub clipboard_command: Vec<String>,
     /// pass store directory. Defaults to `$PASSWORD_STORE_DIR` or `~/.password-store`.
@@ -33,6 +36,7 @@ impl Default for Config {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            qrcode_viewer_command: None,
             clipboard_command: vec!["wl-copy".into()],
             password_store_dir: None,
         }

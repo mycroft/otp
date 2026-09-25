@@ -727,3 +727,114 @@ fn completion_never_prompts_for_the_master_password() {
     env.write_config("backend = \"pass\"\n");
     assert_eq!(complete(&env, &["goo"]), "google.com\tpass\n");
 }
+
+#[test]
+fn qrcode_export_round_trips() {
+    let env = Env::new();
+    env.insert_uri("google/login@domain.tld", HOTP_URI);
+    let uri = || {
+        let output = env
+            .otp()
+            .args(["--otpauth", "google/login@domain.tld"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output).unwrap()
+    };
+    let original = uri();
+
+    let png = env.path("qr.png");
+    env.otp()
+        .arg(format!("--qrcode={}", png.display()))
+        .arg("google/login@domain.tld")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("it contains the secret"));
+    // Re-importing the PNG gives back the same entry.
+    env.otp()
+        .args(["insert", "copy", &format!("--qrcode={}", png.display())])
+        .assert()
+        .success();
+    env.otp()
+        .args(["--otpauth", "copy"])
+        .assert()
+        .success()
+        .stdout(original.clone());
+    // Existing files are not overwritten.
+    env.otp()
+        .arg(format!("--qrcode={}", png.display()))
+        .arg("google/login@domain.tld")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("exists"));
+
+    // Exporting does not consume the HOTP counter.
+    assert_eq!(uri(), original);
+    env.otp()
+        .arg("google/login@domain.tld")
+        .assert()
+        .success()
+        .stdout("755224\n");
+}
+
+#[test]
+fn qrcode_is_drawn_or_shown_with_the_viewer() {
+    let env = Env::new();
+    env.insert_uri("x", HOTP_URI);
+    let output = env
+        .otp()
+        .args(["--qrcode", "x"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let drawn = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = drawn.lines().collect();
+    assert!(lines.len() > 10, "{drawn}");
+    assert!(drawn.contains('█') && drawn.contains('▀'), "{drawn}");
+    assert!(!drawn.contains('\x1b'), "no colors when piped");
+    let width = lines[0].chars().count();
+    assert!(lines.iter().all(|l| l.chars().count() == width), "{drawn}");
+
+    // With a viewer, it gets a PNG instead; `cp` stands in for chafa.
+    let seen = env.path("seen.png");
+    env.write_config(&format!(
+        "qrcode_viewer_command = [\"cp\", \"{{file}}\", \"{}\"]\n",
+        seen.display()
+    ));
+    env.otp()
+        .args(["--qrcode", "x"])
+        .assert()
+        .success()
+        .stdout("");
+    env.otp()
+        .args(["insert", "seen", &format!("--qrcode={}", seen.display())])
+        .assert()
+        .success();
+
+    env.write_config("qrcode_viewer_command = [\"false\"]\n");
+    env.otp()
+        .args(["--qrcode", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("QR code viewer: false failed"));
+}
+
+#[test]
+fn qrcode_needs_an_exact_entry() {
+    let env = Env::new();
+    env.insert_uri("google/a", HOTP_URI);
+    env.otp()
+        .args(["--qrcode", "goo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("goo is not in the store"));
+    env.otp()
+        .args(["--qrcode", "--clip", "google/a"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}

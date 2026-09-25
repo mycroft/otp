@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use otp_core::store::Backend;
-use otp_core::{Entry, Kind};
+use otp_core::{Entry, Kind, qr};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListState, Padding, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
@@ -84,8 +84,8 @@ fn event_loop(
                     Action::Quit => return Ok(None),
                     Action::Copy(index, output) => return Ok(Some((index, output))),
                 }
-                // The inspect window acts on the entry: decrypt it before the next key.
-                if app.mode == Mode::Inspect {
+                // These windows act on the entry: decrypt it before the next key.
+                if matches!(app.mode, Mode::Inspect | Mode::QrCode) {
                     app.load_selected(&mut fetch);
                 }
             }
@@ -110,6 +110,8 @@ enum Mode {
     List,
     Help,
     Inspect,
+    /// The QR code of the selected entry.
+    QrCode,
 }
 
 /// Ctrl+? (kitty protocol), Ctrl+/ (sent as Ctrl+7 by legacy terminals) or F1.
@@ -128,6 +130,10 @@ fn is_inspect_key(key: &KeyEvent) -> bool {
 pub struct App {
     rows: Vec<(String, Backend)>,
     mode: Mode,
+    /// Where Esc goes from the QR code window: the list or the inspect window.
+    qr_return: Mode,
+    /// Codes are masked in the code column (toggled with Ctrl-H).
+    hide_code: bool,
     filter: String,
     /// Indices into `rows` matching the filter.
     visible: Vec<usize>,
@@ -141,6 +147,8 @@ impl App {
         let mut app = App {
             rows,
             mode: Mode::List,
+            qr_return: Mode::List,
+            hide_code: false,
             filter: String::new(),
             visible: Vec::new(),
             list: ListState::default(),
@@ -200,10 +208,24 @@ impl App {
                         self.mode = Mode::List;
                         Action::None
                     }
+                    KeyCode::Char('h') if ctrl => {
+                        self.hide_code = !self.hide_code;
+                        Action::None
+                    }
                     KeyCode::Char('s') if !ctrl => self.copy_loaded(Output::Secret),
                     KeyCode::Char('u') if !ctrl => self.copy_loaded(Output::Uri),
+                    KeyCode::Char('r') if !ctrl => {
+                        self.open_qrcode();
+                        Action::None
+                    }
                     _ => Action::None,
                 };
+            }
+            Mode::QrCode => {
+                if key.code == KeyCode::Esc {
+                    self.mode = self.qr_return;
+                }
+                return Action::None;
             }
         }
         if is_help_key(&key) {
@@ -214,6 +236,15 @@ impl App {
             if self.selected().is_some() {
                 self.mode = Mode::Inspect;
             }
+            return Action::None;
+        }
+        if ctrl && key.code == KeyCode::Char('r') {
+            self.open_qrcode();
+            return Action::None;
+        }
+        // Legacy terminals send Ctrl-H as 0x08, distinct from Backspace (0x7F).
+        if ctrl && key.code == KeyCode::Char('h') {
+            self.hide_code = !self.hide_code;
             return Action::None;
         }
         match key.code {
@@ -245,12 +276,35 @@ impl App {
         Action::None
     }
 
+    /// `value`, or as many bullets when codes and secrets are hidden (Ctrl-H).
+    fn mask(&self, value: &str) -> String {
+        if self.hide_code {
+            "•".repeat(value.chars().count())
+        } else {
+            value.to_string()
+        }
+    }
+
+    /// Shows the QR code of the selected entry; Esc comes back to the current window.
+    fn open_qrcode(&mut self) {
+        if self.selected().is_some() {
+            self.qr_return = self.mode;
+            self.mode = Mode::QrCode;
+        }
+    }
+
+    /// The selected entry, once it has been decrypted successfully.
+    fn selected_entry(&self) -> Option<&Entry> {
+        match self.loaded.get(&self.selected()?) {
+            Some(Ok(entry)) => Some(entry),
+            _ => None,
+        }
+    }
+
     /// Copies from the selected entry, once it has been decrypted successfully.
     fn copy_loaded(&self, output: Output) -> Action {
-        match self.selected() {
-            Some(index) if matches!(self.loaded.get(&index), Some(Ok(_))) => {
-                Action::Copy(index, output)
-            }
+        match (self.selected(), self.selected_entry()) {
+            (Some(index), Some(_)) => Action::Copy(index, output),
             _ => Action::None,
         }
     }
@@ -278,7 +332,8 @@ impl App {
         match self.mode {
             Mode::List => {}
             Mode::Help => render_help(frame),
-            Mode::Inspect => self.render_inspect(frame),
+            Mode::Inspect => self.render_inspect(frame, now),
+            Mode::QrCode => self.render_qrcode(frame),
         }
     }
 
@@ -299,7 +354,11 @@ impl App {
     }
 
     fn render_code(&self, frame: &mut Frame, area: Rect, now: SystemTime) {
-        let block = Block::bordered().title(" Code ");
+        let block = Block::bordered().title(if self.hide_code {
+            " Code (hidden) "
+        } else {
+            " Code "
+        });
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let Some(index) = self.selected() else {
@@ -332,7 +391,7 @@ impl App {
                 // Generating a TOTP code does not modify the entry.
                 let code = entry.otp.clone().generate(now);
                 let remaining = code.valid_for.map_or(0, |d| d.as_secs());
-                let line = Line::from(group_digits(&code.value).bold()).centered();
+                let line = Line::from(group_digits(&self.mask(&code.value)).bold()).centered();
                 frame.render_widget(Paragraph::new(vec![Line::default(), line]), code_area);
                 let gauge = Gauge::default()
                     .ratio(remaining as f64 / f64::from(period))
@@ -375,7 +434,9 @@ impl App {
     }
 
     fn render_prompt(&self, frame: &mut Frame, area: Rect) {
-        let help = Line::from(" Enter copy & quit · Tab inspect · Ctrl-/ help · Esc quit ".dim());
+        let help = Line::from(
+            " Enter copy · Tab inspect · Ctrl-R QR code · Ctrl-/ help · Esc quit ".dim(),
+        );
         let block = Block::bordered().title(" Filter ").title_bottom(help);
         let inner = block.inner(area);
         frame.render_widget(Paragraph::new(self.filter.as_str()).block(block), area);
@@ -386,7 +447,7 @@ impl App {
         }
     }
 
-    fn render_inspect(&self, frame: &mut Frame) {
+    fn render_inspect(&self, frame: &mut Frame, now: SystemTime) {
         let Some(index) = self.selected() else {
             return;
         };
@@ -395,7 +456,9 @@ impl App {
         let block = Block::bordered()
             .padding(Padding::horizontal(1))
             .title(format!(" {name} "))
-            .title_bottom(Line::from(" s copy secret · u copy URI · Esc close ".dim()));
+            .title_bottom(Line::from(
+                " s copy secret · u copy URI · r QR code · Esc close ".dim(),
+            ));
         let inner_width = block.inner(area).width.max(1) as usize;
 
         let lines = match self.loaded.get(&index) {
@@ -410,8 +473,24 @@ impl App {
                     ])
                 };
                 let optional = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".into());
+                let code = match otp.kind {
+                    Kind::Totp { .. } => {
+                        // Generating a TOTP code does not modify the entry.
+                        let code = otp.clone().generate(now);
+                        let remaining = code.valid_for.map_or(0, |d| d.as_secs());
+                        format!(
+                            "{} ({remaining}s left)",
+                            group_digits(&self.mask(&code.value))
+                        )
+                    }
+                    Kind::Hotp { .. } => "- (Enter in the list generates one)".into(),
+                };
+                let secret = otp.secret_base32();
+                // The URI embeds the secret verbatim: mask just that part when hidden.
+                let uri = otp.to_uri().replace(&secret, &self.mask(&secret));
                 vec![
-                    field("secret", otp.secret_base32()).bold(),
+                    field("code", code).bold(),
+                    field("secret", self.mask(&secret)).bold(),
                     field("type", crate::describe_kind(otp.kind)),
                     field("algorithm", otp.algorithm.to_string()),
                     field("digits", otp.digits.to_string()),
@@ -422,7 +501,7 @@ impl App {
                     field("updated", crate::timestamp(entry.meta.updated_at)),
                     Line::default(),
                     Line::from("otpauth URI".dim()),
-                    Line::from(otp.to_uri()),
+                    Line::from(uri),
                 ]
             }
         };
@@ -440,6 +519,62 @@ impl App {
     }
 }
 
+impl App {
+    fn render_qrcode(&self, frame: &mut Frame) {
+        let Some(index) = self.selected() else {
+            return;
+        };
+        let entry = match self.loaded.get(&index) {
+            None => return render_message(frame, "Decrypting…"),
+            Some(Err(error)) => return render_message(frame, error),
+            Some(Ok(entry)) => entry,
+        };
+        let area = frame.area();
+        let lines = match qr::QrMatrix::encode_compact(&entry.otp.to_uri()) {
+            Ok(matrix) => matrix.half_block_lines(2),
+            Err(error) => return render_message(frame, &error.to_string()),
+        };
+        let (width, height) = (lines[0].chars().count() as u16, lines.len() as u16);
+        if width > area.width || height > area.height {
+            return render_message(
+                frame,
+                &format!(
+                    "The terminal is too small for the QR code: it needs {width}×{height}, \
+                     this one is {}×{}.",
+                    area.width, area.height
+                ),
+            );
+        }
+        // Dark modules on a light background, whatever the terminal's colors.
+        let colors = Style::new().fg(Color::Indexed(16)).bg(Color::Indexed(231));
+        let with_hint = height < area.height;
+        let qr_area = centered(area, width, height + u16::from(with_hint));
+        // Nothing else on screen, so cameras only see the code.
+        frame.render_widget(Clear, area);
+        let [code_area, hint_area] =
+            Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(qr_area);
+        let lines: Vec<Line> = lines.into_iter().map(Line::from).collect();
+        frame.render_widget(Paragraph::new(lines).style(colors), code_area);
+        if with_hint {
+            let hint = format!(" {} · Esc back ", self.rows[index].0);
+            frame.render_widget(Line::from(hint.dim()).centered(), hint_area);
+        }
+    }
+}
+
+/// A small centered window with a message and an "Esc back" hint.
+fn render_message(frame: &mut Frame, message: &str) {
+    let area = centered(frame.area(), 50, 6);
+    let block = Block::bordered()
+        .padding(Padding::horizontal(1))
+        .title_bottom(Line::from(" Esc back ".dim()));
+    frame.render_widget(Clear, area);
+    let paragraph = Paragraph::new(message)
+        .block(block)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
+}
+
 const HELP: &[(&str, &str)] = &[
     ("↑ / Ctrl-P", "previous entry"),
     ("↓ / Ctrl-N", "next entry"),
@@ -448,12 +583,15 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl-U", "clear the filter"),
     ("Enter", "copy the code and quit"),
     ("Tab / Ctrl-I", "inspect the entry: secret and details"),
+    ("Ctrl-R", "show the QR code (Esc goes back)"),
+    ("Ctrl-H", "hide or show the code and secret"),
     ("Ctrl-? / Ctrl-/ / F1", "show this help"),
     ("Esc / Ctrl-C", "quit"),
     ("", ""),
     ("In the inspect window", ""),
     ("s", "copy the base32 secret and quit"),
     ("u", "copy the otpauth:// URI and quit"),
+    ("r", "show the QR code (Esc goes back)"),
     ("Esc", "close the window"),
 ];
 
@@ -491,7 +629,9 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 /// Splits a code in two halves for readability: `123456` → `123 456`.
 fn group_digits(code: &str) -> String {
-    let (left, right) = code.split_at(code.len() / 2);
+    let middle = code.chars().count() / 2;
+    let left: String = code.chars().take(middle).collect();
+    let right: String = code.chars().skip(middle).collect();
     format!("{left} {right}")
 }
 
@@ -654,7 +794,10 @@ mod tests {
         assert!(screen.contains("issuer  Google"), "{screen}");
         assert!(screen.contains("account alice@gmail.com"), "{screen}");
         assert!(screen.contains("store   native"), "{screen}");
-        assert!(screen.contains("Enter copy & quit"), "{screen}");
+        assert!(
+            screen.contains("Enter copy · Tab inspect · Ctrl-R QR code"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -781,7 +924,153 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("s copy secret · u copy URI · Esc close"),
+            screen.contains("s copy secret · u copy URI · r QR code · Esc close"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn qr_code_window_opens_from_inspect() {
+        let mut app = app(&["a"]);
+        app.handle_key(key(KeyCode::Tab));
+        // Before the entry is decrypted, the window says so.
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.mode, Mode::QrCode);
+        assert!(render_sized(&mut app, 80, 30).contains("Decrypting"));
+        app.handle_key(key(KeyCode::Esc));
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.mode, Mode::QrCode);
+        // Other keys are ignored; Esc goes back to the inspect window.
+        assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Action::None);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Inspect);
+        // `r` means nothing in the list: it is typed into the filter.
+        app.handle_key(key(KeyCode::Esc));
+        type_text(&mut app, "r");
+        assert_eq!((app.mode, app.filter.as_str()), (Mode::List, "r"));
+    }
+
+    #[test]
+    fn ctrl_r_opens_the_qr_code_from_the_list() {
+        let mut app = app(&["a", "b"]);
+        app.handle_key(key(KeyCode::Down));
+        app.load_selected(&mut |_, _| bail!("gpg failed"));
+        app.handle_key(ctrl('r'));
+        assert_eq!(app.mode, Mode::QrCode);
+        assert!(render_sized(&mut app, 80, 30).contains("gpg failed"));
+        // Esc goes back to the list, not to the inspect window, and does not quit.
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), Action::None);
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(app.selected(), Some(1));
+        // Plain `r` still types into the filter; nothing to show without a match.
+        type_text(&mut app, "zzz");
+        app.handle_key(ctrl('r'));
+        assert_eq!((app.mode, app.filter.as_str()), (Mode::List, "zzz"));
+    }
+
+    #[test]
+    fn renders_the_qr_code_or_a_size_warning() {
+        let mut app = app(&["google.com/alice"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('r')));
+
+        let matrix = qr::QrMatrix::encode_compact(&totp_entry().otp.to_uri()).unwrap();
+        let expected = matrix.half_block_lines(2);
+        let screen = render_sized(&mut app, 80, 30);
+        for line in &expected {
+            assert!(
+                screen.contains(line.as_str()),
+                "missing {line:?} in\n{screen}"
+            );
+        }
+        assert!(screen.contains("google.com/alice · Esc back"), "{screen}");
+
+        let screen = render_sized(&mut app, 40, 16);
+        assert!(screen.contains("too small"), "{screen}");
+    }
+
+    #[test]
+    fn ctrl_h_toggles_the_code() {
+        let mut app = app(&["google.com/alice"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        let at_59 = UNIX_EPOCH + Duration::from_secs(59);
+
+        app.handle_key(ctrl('h'));
+        let screen = render(&mut app, at_59);
+        assert!(screen.contains("Code (hidden)"), "{screen}");
+        assert!(screen.contains("•••• ••••"), "{screen}");
+        assert!(!screen.contains("9428"), "{screen}");
+        assert!(screen.contains("1s"), "the countdown stays: {screen}");
+        // Enter still copies the (hidden) code.
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Copy(0, Output::Code)
+        );
+
+        app.handle_key(ctrl('h'));
+        let screen = render(&mut app, at_59);
+        assert!(screen.contains("9428 7082"), "{screen}");
+        assert!(!screen.contains("hidden"), "{screen}");
+
+        // Backspace edits the filter and leaves the code visible.
+        type_text(&mut app, "a");
+        app.handle_key(key(KeyCode::Backspace));
+        assert!(!app.hide_code);
+    }
+
+    #[test]
+    fn inspect_shows_the_code_and_masks_secrets_when_hidden() {
+        let mut app = app(&["google.com/alice"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        app.handle_key(key(KeyCode::Tab));
+        let at_59 = UNIX_EPOCH + Duration::from_secs(59);
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+        let screen = render_at(&mut app, at_59, 80, 24);
+        assert!(
+            screen.contains("code       9428 7082 (1s left)"),
+            "{screen}"
+        );
+        assert!(screen.contains(&format!("secret     {secret}")), "{screen}");
+
+        // Ctrl-H works from the inspect window too.
+        app.handle_key(ctrl('h'));
+        let screen = render_at(&mut app, at_59, 80, 24);
+        assert!(!screen.contains("GEZDGNBV"), "{screen}");
+        assert!(!screen.contains("9428"), "{screen}");
+        assert!(
+            screen.contains("code       •••• •••• (1s left)"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains(&format!("secret     {}", "•".repeat(32))),
+            "{screen}"
+        );
+        // Only the secret is masked in the URI.
+        assert!(
+            screen.contains("otpauth://totp/Google:alice@gmail.com?secret=••••"),
+            "{screen}"
+        );
+        assert!(screen.contains("issuer     Google"), "{screen}");
+        // Copying still gives the real values.
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('s'))),
+            Action::Copy(0, Output::Secret)
+        );
+
+        // HOTP codes are not generated by inspecting.
+        let mut hotp = self::app(&["bank"]);
+        hotp.load_selected(&mut |_, _| {
+            Ok(Entry::new(
+                OtpSecret::new(b"k".to_vec(), Kind::Hotp { counter: 3 }).unwrap(),
+            ))
+        });
+        hotp.handle_key(key(KeyCode::Tab));
+        let screen = render_at(&mut hotp, at_59, 80, 24);
+        assert!(
+            screen.contains("code       - (Enter in the list generates one)"),
             "{screen}"
         );
     }
@@ -791,5 +1080,7 @@ mod tests {
         assert_eq!(group_digits("123456"), "123 456");
         assert_eq!(group_digits("12345678"), "1234 5678");
         assert_eq!(group_digits("1234567"), "123 4567");
+        // Masked codes are grouped by characters, not bytes.
+        assert_eq!(group_digits("•••••••"), "••• ••••");
     }
 }

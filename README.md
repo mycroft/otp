@@ -26,7 +26,7 @@ Run the same command again to update. To remove the binary, run
 `cargo uninstall otp-cli` (the package is `otp-cli`, the binary is `otp`).
 
 Optional runtime tools, looked up in `$PATH`: `pass` (for `--pass`), `grimshot` (for
-`--qrcode`) and `wl-copy` (for `--clip`). The last two can be changed in the
+`insert --qrcode`) and `wl-copy` (for `--clip`). The last two can be changed in the
 configuration.
 
 ## Shell completion
@@ -67,6 +67,8 @@ otp -c google.com/codingmyc@gmail.com       # copy to the clipboard instead
 # Export instead of generating a code (combines with -c; HOTP counters are untouched)
 otp --secret google.com/codingmyc@gmail.com   # base32 secret
 otp --otpauth google.com/codingmyc@gmail.com  # full otpauth:// URI
+otp --qrcode google.com/codingmyc@gmail.com   # QR code, drawn in the terminal
+otp --qrcode=google.png google.com/codingmyc@gmail.com  # QR code as a PNG
 
 # Insert: paste an otpauth:// URI (hidden prompt, or read from stdin)
 otp insert google.com/codingmyc@gmail.com
@@ -105,9 +107,12 @@ with `--pass` / `--native`:
   selected.
 - Enter copies the selected code with `clipboard_command` and quits. HOTP codes are
   only generated here, since generating one advances the counter. Esc or Ctrl-C quits.
-- Tab or Ctrl-I opens the inspect window. It shows the base32 secret, every parameter
-  and the `otpauth://` URI. There, `s` copies the secret and `u` copies the URI (then
-  otp quits), and Esc closes it.
+- Tab or Ctrl-I opens the inspect window. It shows the current code, the base32 secret,
+  every parameter and the `otpauth://` URI. There, `s` copies the secret and `u` copies the URI (then
+  otp quits), `r` shows the QR code (Esc goes back), and Esc closes it.
+- Ctrl-R shows the selected entry's QR code directly; Esc goes back to the list.
+- Ctrl-H hides or shows the code, and the secret in the inspect window (the countdown
+  stays, and copying still gives the real values). It works in the inspect window too.
 - Ctrl-?, Ctrl-/ or F1 shows the help with all shortcuts; Esc closes it.
 
 Most terminals send Ctrl-I as Tab and Ctrl-? as Backspace. otp turns on the kitty
@@ -153,6 +158,7 @@ database = "~/.local/share/otp/otp.db"
 password_command = ["pass", "show", "otp/master"]
 capture_command = ["grimshot", "save", "area", "{file}"]   # {file}: PNG to write
 clipboard_command = ["wl-copy"]
+qrcode_viewer_command = ["chafa", "{file}"]   # for otp --qrcode; unset: drawn by otp
 password_store_dir = "~/.password-store"
 ```
 

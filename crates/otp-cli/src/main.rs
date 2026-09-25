@@ -5,8 +5,8 @@ mod stores;
 #[cfg(feature = "tui")]
 mod tui;
 
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::SystemTime;
 
@@ -97,6 +97,15 @@ struct CodeArgs {
     /// Output the otpauth:// URI instead of a code
     #[arg(long, requires = "name")]
     otpauth: bool,
+    /// Show the otpauth QR code instead of a code, or write it to --qrcode=FILE (a PNG)
+    #[arg(
+        long,
+        value_name = "FILE",
+        require_equals = true,
+        requires = "name",
+        conflicts_with_all = ["clip", "secret", "otpauth"]
+    )]
+    qrcode: Option<Option<PathBuf>>,
     #[command(flatten)]
     only: BackendArgs,
 }
@@ -110,6 +119,7 @@ impl CodeArgs {
             clip: true,
             secret: output == tui::Output::Secret,
             otpauth: output == tui::Output::Uri,
+            qrcode: None,
             only: BackendArgs {
                 pass: backend == Backend::Pass,
                 native: backend == Backend::Native,
@@ -264,7 +274,7 @@ fn code_or_list(stores: &mut Stores, config: &Config, args: CodeArgs) -> Result<
     if validate_name(name).is_ok() && stores.find(name, only)?.is_some() {
         return code(stores, config, args);
     }
-    let exporting = args.clip || args.secret || args.otpauth;
+    let exporting = args.clip || args.secret || args.otpauth || args.qrcode.is_some();
     if exporting || list(stores, name, false, only)? == 0 {
         // Report the lookup failure.
         stores.locate(name, only)?;
@@ -278,7 +288,11 @@ fn code(stores: &mut Stores, config: &Config, args: CodeArgs) -> Result<()> {
     let backend = stores.locate(&name, args.only.only(config.backend()))?;
     let store = stores.get(backend)?.expect("located store exists");
     let mut entry = store.get(&name)?.context("entry disappeared")?;
-    // Exporting the secret or URI leaves an HOTP counter untouched.
+    // Exporting the secret, URI or QR code leaves an HOTP counter untouched.
+    if let Some(file) = &args.qrcode {
+        let uri = Zeroizing::new(entry.otp.to_uri());
+        return show_qrcode(config, &uri, file.as_deref());
+    }
     let (output, what) = if args.secret {
         (Zeroizing::new(entry.otp.secret_base32()), "secret")
     } else if args.otpauth {
@@ -441,6 +455,35 @@ fn passwd(stores: &mut Stores) -> Result<()> {
     let password = PasswordSource::Prompt.new_password("New master password")?;
     store.change_password(password.as_bytes())?;
     eprintln!("Master password changed.");
+    Ok(())
+}
+
+/// Writes the QR code of `uri` to `file`, or shows it: with `qrcode_viewer_command` when
+/// configured, otherwise drawn in the terminal.
+fn show_qrcode(config: &Config, uri: &str, file: Option<&Path>) -> Result<()> {
+    if let Some(path) = file {
+        qr::write_png(uri, path).with_context(|| format!("writing {}", path.display()))?;
+        eprintln!(
+            "Wrote the QR code to {}; it contains the secret.",
+            path.display()
+        );
+        return Ok(());
+    }
+    if let Some(viewer) = &config.qrcode_viewer_command {
+        return Ok(qr::view(viewer, uri)?);
+    }
+    let lines = qr::QrMatrix::encode_compact(uri)?.half_block_lines(2);
+    // Force dark modules on a light background whatever the terminal's colors: palette
+    // entries 16 (black) and 231 (white) are not affected by themes.
+    let (start, end) = if std::io::stdout().is_terminal() {
+        ("\x1b[38;5;16;48;5;231m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    let mut out = std::io::stdout().lock();
+    for line in lines {
+        writeln!(out, "{start}{line}{end}")?;
+    }
     Ok(())
 }
 

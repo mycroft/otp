@@ -23,6 +23,13 @@ capture_command = ["grimshot", "save", "area", "{file}"]
 #capture_command = ["scrot", "--select", "{file}"]
 #capture_command = ["spectacle", "--region", "--background", "--nonotify", "--output", "{file}"]
 
+# Viewer for `otp --qrcode NAME`, given a temporary PNG as {file} that is deleted
+# when the viewer exits, so it must not return before showing the image. No default:
+# otp draws the QR code in the terminal itself, which is exact and needs no tool.
+# The TUI always draws it itself.
+#qrcode_viewer_command = ["chafa", "{file}"]
+#qrcode_viewer_command = ["imv", "{file}"]
+
 # Command receiving the code on stdin for `otp --clip`.
 clipboard_command = ["wl-copy"]
 #clipboard_command = ["xclip", "-selection", "clipboard"]

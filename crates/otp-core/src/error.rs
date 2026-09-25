@@ -34,6 +34,9 @@ pub enum Error {
     #[error("screenshot capture failed: {0}")]
     Capture(String),
 
+    #[error("QR code viewer: {0}")]
+    Viewer(String),
+
     #[error("QR code: {0}")]
     Qr(String),
 

@@ -2,6 +2,8 @@ mod complete;
 mod config;
 mod prompt;
 mod stores;
+#[cfg(feature = "tui")]
+mod tui;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -73,6 +75,12 @@ enum Command {
     },
     /// Change the master password of the native database
     Passwd,
+    /// Browse entries interactively; Enter copies the selected code
+    #[cfg(feature = "tui")]
+    Tui {
+        #[command(flatten)]
+        only: BackendArgs,
+    },
 }
 
 #[derive(Args)]
@@ -91,6 +99,23 @@ struct CodeArgs {
     otpauth: bool,
     #[command(flatten)]
     only: BackendArgs,
+}
+
+#[cfg(feature = "tui")]
+impl CodeArgs {
+    /// Arguments of `otp -c NAME`, restricted to `backend`.
+    fn copy(name: String, backend: Backend) -> Self {
+        CodeArgs {
+            name: Some(name),
+            clip: true,
+            secret: false,
+            otpauth: false,
+            only: BackendArgs {
+                pass: backend == Backend::Pass,
+                native: backend == Backend::Native,
+            },
+        }
+    }
 }
 
 #[derive(Args)]
@@ -193,6 +218,12 @@ fn run(cli: Cli) -> Result<()> {
     let db_path = config.database_path()?;
     let password = PasswordSource::new(config.password_command.as_deref());
     let pass = PassStore::new(config.password_store_dir.clone());
+    #[cfg(feature = "tui")]
+    // gpg output would corrupt the screen; errors are shown in the TUI instead.
+    let pass = match cli.command {
+        Some(Command::Tui { .. }) => pass.non_interactive(),
+        _ => pass,
+    };
     let mut stores = Stores::new(db_path, password, pass);
     let default = config.backend();
 
@@ -211,6 +242,12 @@ fn run(cli: Cli) -> Result<()> {
             remove(&mut stores, &name, force, only.only(default))
         }
         Some(Command::Passwd) => passwd(&mut stores),
+        #[cfg(feature = "tui")]
+        Some(Command::Tui { only }) => match tui::run(&mut stores, only.only(default))? {
+            // Copying goes through `otp -c` so HOTP counters are persisted the same way.
+            Some((name, backend)) => code(&mut stores, &config, CodeArgs::copy(name, backend)),
+            None => Ok(()),
+        },
     }
 }
 

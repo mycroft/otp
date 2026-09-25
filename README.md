@@ -16,6 +16,12 @@ cargo install --path crates/otp-cli                   # installs ~/.cargo/bin/ot
 cargo install --path crates/otp-cli --root ~/.local   # or ~/.local/bin/otp
 ```
 
+The interactive `otp tui` command is an optional feature:
+
+```sh
+cargo install --path crates/otp-cli --features tui
+```
+
 Run the same command again to update. To remove the binary, run
 `cargo uninstall otp-cli` (the package is `otp-cli`, the binary is `otp`).
 
@@ -87,6 +93,23 @@ the master password, then the native database. `--pass` / `--native` restrict an
 command to one store; `backend = "pass"` or `backend = "database"` in the
 configuration makes that the default.
 
+## TUI
+
+`otp tui` (built with `--features tui`) lists all entries, or only those in one store
+with `--pass` / `--native`:
+
+- Type to filter the list: case-insensitive substring match; Backspace edits, Ctrl-U
+  clears.
+- ↑/↓ (or Ctrl-P/Ctrl-N) select an entry. Its code, time left, issuer and account show
+  in the right-hand column. pass entries are decrypted the first time they are
+  selected.
+- Enter copies the selected code with `clipboard_command` and quits. HOTP codes are
+  only generated here, since generating one advances the counter. Esc or Ctrl-C quits.
+
+The master password, if needed, is asked before the TUI starts. gpg runs without access
+to the terminal, so use a graphical pinentry (or have gpg-agent unlocked) for pass
+entries; decryption errors are shown in the TUI.
+
 ## Storage
 
 **Native database**: `~/.local/share/otp/otp.db` by default. A JSON envelope whose
@@ -135,8 +158,8 @@ Environment variables:
 ## Development
 
 ```sh
-cargo test --workspace   # the pass integration test is skipped when pass/gpg are missing
-cargo clippy --workspace --all-targets
+cargo test --workspace --all-features   # pass test skipped without pass/gpg
+cargo clippy --workspace --all-targets --all-features
 ```
 
 GitHub Actions runs `cargo fmt --check`, `cargo clippy -D warnings` and the tests on

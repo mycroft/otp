@@ -32,6 +32,7 @@ pub struct PassStore {
     program: OsString,
     store_dir: PathBuf,
     envs: Vec<(OsString, OsString)>,
+    interactive: bool,
 }
 
 impl PassStore {
@@ -47,6 +48,7 @@ impl PassStore {
             program: "pass".into(),
             store_dir,
             envs: Vec::new(),
+            interactive: true,
         }
     }
 
@@ -59,6 +61,13 @@ impl PassStore {
     /// Sets an environment variable for pass invocations (e.g. `GNUPGHOME`).
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.envs.push((key.into(), value.into()));
+        self
+    }
+
+    /// Keeps `pass show` away from the terminal: no stdin, and gpg's stderr is captured
+    /// into the error message instead of being printed. For full-screen interfaces.
+    pub fn non_interactive(mut self) -> Self {
+        self.interactive = false;
         self
     }
 
@@ -92,19 +101,26 @@ impl PassStore {
 
     fn show(&self, name: &str) -> Result<Zeroizing<String>> {
         let pass_name = Self::pass_name(name);
-        // stderr is inherited so gpg/pass diagnostics reach the user.
+        // When interactive, stderr is inherited so gpg/pass diagnostics reach the user.
+        let (stdin, stderr) = if self.interactive {
+            (Stdio::inherit(), Stdio::inherit())
+        } else {
+            (Stdio::null(), Stdio::piped())
+        };
         let output = self
             .command(&["show", "--", &pass_name])
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdin(stdin)
+            .stderr(stderr)
             .output()
             .map_err(|e| self.spawn_error(e))?;
         let stdout = Zeroizing::new(output.stdout);
         if !output.status.success() {
-            return Err(Error::Pass(format!(
-                "`pass show {pass_name}` failed ({})",
-                output.status
-            )));
+            let diagnostics = String::from_utf8_lossy(&output.stderr);
+            let detail = diagnostics.lines().rev().find(|l| !l.trim().is_empty());
+            return Err(Error::Pass(match detail {
+                Some(detail) => format!("`pass show {pass_name}` failed: {}", detail.trim()),
+                None => format!("`pass show {pass_name}` failed ({})", output.status),
+            }));
         }
         String::from_utf8(stdout.to_vec())
             .map(Zeroizing::new)

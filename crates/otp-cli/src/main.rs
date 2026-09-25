@@ -103,13 +103,13 @@ struct CodeArgs {
 
 #[cfg(feature = "tui")]
 impl CodeArgs {
-    /// Arguments of `otp -c NAME`, restricted to `backend`.
-    fn copy(name: String, backend: Backend) -> Self {
+    /// Arguments of `otp -c [--secret|--otpauth] NAME`, restricted to `backend`.
+    fn copy(name: String, backend: Backend, output: tui::Output) -> Self {
         CodeArgs {
             name: Some(name),
             clip: true,
-            secret: false,
-            otpauth: false,
+            secret: output == tui::Output::Secret,
+            otpauth: output == tui::Output::Uri,
             only: BackendArgs {
                 pass: backend == Backend::Pass,
                 native: backend == Backend::Native,
@@ -245,7 +245,9 @@ fn run(cli: Cli) -> Result<()> {
         #[cfg(feature = "tui")]
         Some(Command::Tui { only }) => match tui::run(&mut stores, only.only(default))? {
             // Copying goes through `otp -c` so HOTP counters are persisted the same way.
-            Some((name, backend)) => code(&mut stores, &config, CodeArgs::copy(name, backend)),
+            Some((name, backend, output)) => {
+                code(&mut stores, &config, CodeArgs::copy(name, backend, output))
+            }
             None => Ok(()),
         },
     }
@@ -398,17 +400,9 @@ fn show(stores: &mut Stores, name: &str, uri: bool, only: Option<Backend>) -> Re
         println!("{}", otp.to_uri());
         return Ok(());
     }
-    let kind = match otp.kind {
-        Kind::Totp { period } => format!("TOTP, {period}s period"),
-        Kind::Hotp { counter } => format!("HOTP, next counter {counter}"),
-    };
-    let timestamp = |t: Option<time::OffsetDateTime>| {
-        t.and_then(|t| t.format(&Rfc3339).ok())
-            .unwrap_or_else(|| "-".into())
-    };
     println!("name:      {name}");
     println!("store:     {backend}");
-    println!("type:      {kind}");
+    println!("type:      {}", describe_kind(otp.kind));
     println!("issuer:    {}", otp.issuer.as_deref().unwrap_or("-"));
     println!("account:   {}", otp.account.as_deref().unwrap_or("-"));
     println!("algorithm: {}", otp.algorithm);
@@ -416,6 +410,18 @@ fn show(stores: &mut Stores, name: &str, uri: bool, only: Option<Backend>) -> Re
     println!("created:   {}", timestamp(entry.meta.created_at));
     println!("updated:   {}", timestamp(entry.meta.updated_at));
     Ok(())
+}
+
+fn describe_kind(kind: Kind) -> String {
+    match kind {
+        Kind::Totp { period } => format!("TOTP, {period}s period"),
+        Kind::Hotp { counter } => format!("HOTP, next counter {counter}"),
+    }
+}
+
+fn timestamp(t: Option<time::OffsetDateTime>) -> String {
+    t.and_then(|t| t.format(&Rfc3339).ok())
+        .unwrap_or_else(|| "-".into())
 }
 
 fn remove(stores: &mut Stores, name: &str, force: bool, only: Option<Backend>) -> Result<()> {

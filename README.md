@@ -105,6 +105,14 @@ with `--pass` / `--native`:
   selected.
 - Enter copies the selected code with `clipboard_command` and quits. HOTP codes are
   only generated here, since generating one advances the counter. Esc or Ctrl-C quits.
+- Tab or Ctrl-I opens the inspect window. It shows the base32 secret, every parameter
+  and the `otpauth://` URI. There, `s` copies the secret and `u` copies the URI (then
+  otp quits), and Esc closes it.
+- Ctrl-?, Ctrl-/ or F1 shows the help with all shortcuts; Esc closes it.
+
+Most terminals send Ctrl-I as Tab and Ctrl-? as Backspace. otp turns on the kitty
+keyboard protocol where it's available (kitty, foot, WezTerm, Ghostty, recent Alacritty)
+so they can be told apart. Elsewhere, use Tab and Ctrl-/ or F1.
 
 The master password, if needed, is asked before the TUI starts. gpg runs without access
 to the terminal, so use a graphical pinentry (or have gpg-agent unlocked) for pass

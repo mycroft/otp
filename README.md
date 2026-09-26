@@ -105,15 +105,20 @@ with `--pass` / `--native`:
 
 - Type to filter the list: case-insensitive substring match; Backspace edits, Ctrl-U
   clears.
-- ↑/↓ (or Ctrl-P/Ctrl-N) select an entry. Its code, time left, issuer and account show
+- ↑/↓ select an entry. Its code, time left, issuer and account show
   in the right-hand column. pass entries are decrypted the first time they are
   selected.
 - Enter copies the selected code with `clipboard_command` and quits. HOTP codes are
   only generated here, since generating one advances the counter. Esc or Ctrl-C quits.
 - Tab or Ctrl-I opens the inspect window. It shows the current code, the base32 secret,
-  every parameter and the `otpauth://` URI. There, `s` copies the secret and `u` copies the URI (then
-  otp quits), `r` shows the QR code (Esc goes back), and Esc closes it.
+  every parameter and the `otpauth://` URI. There, `s` copies the secret and `u` copies
+  the URI (then otp quits), `r` shows the QR code (Esc goes back), and Esc closes it.
 - Ctrl-R shows the selected entry's QR code directly; Esc goes back to the list.
+- Ctrl-N creates an entry. The name starts as the current filter; then choose `u` to
+  paste an otpauth URI, `s` to type a base32 secret (TOTP with the defaults of `otp
+  insert --secret`), or `q` to capture a QR code with `capture_command`. It goes to the
+  store `otp insert` would use (`--pass`/`--native`, then `backend`, then native). Esc
+  cancels at any step.
 - Codes are shown as one unbroken string, so a mouse selection copies them as they are;
   set `group_digits = true` under `[tui]` in the configuration to show `123 456`.
 - Ctrl-H hides or shows the code, and the secret in the inspect window (the countdown
@@ -125,9 +130,12 @@ Most terminals send Ctrl-I as Tab and Ctrl-? as Backspace. otp turns on the kitt
 keyboard protocol where it's available (kitty, foot, WezTerm, Ghostty, recent Alacritty)
 so they can be told apart. Elsewhere, use Tab and Ctrl-/ or F1.
 
-The master password, if needed, is asked before the TUI starts. gpg runs without access
-to the terminal, so use a graphical pinentry (or have gpg-agent unlocked) for pass
-entries; decryption errors are shown in the TUI.
+The master password, if needed, is asked before the TUI starts, and never while it runs.
+When the database was not opened at startup (e.g. with `--pass`), creating an entry
+checks it for duplicates only if `password_command` or `OTP_PASSWORD` can open it. The
+same applies to creating the database from the TUI. gpg runs without access to the
+terminal, so use a graphical pinentry (or have gpg-agent unlocked) for pass entries;
+errors are shown in the TUI.
 
 ## Storage
 

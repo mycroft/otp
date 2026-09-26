@@ -1,12 +1,12 @@
 //! `otp tui`: browse entries, see the selected entry's code, copy it.
 
 use std::collections::HashMap;
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use otp_core::store::Backend;
-use otp_core::{Entry, Kind, qr};
+use otp_core::{Entry, Kind, OtpSecret, qr, validate_name};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -18,8 +18,9 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListState, Padding, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
+use zeroize::Zeroizing;
 
-use crate::config::TuiConfig;
+use crate::config::Config;
 use crate::stores::Stores;
 
 /// What to copy for the picked entry.
@@ -31,22 +32,24 @@ pub enum Output {
 }
 
 /// Runs the TUI and returns the entry picked for copying, if any. With `hidden`, codes
-/// and secrets start masked.
+/// and secrets start masked. New entries go to `only`, or the native database.
 pub fn run(
     stores: &mut Stores,
     only: Option<Backend>,
-    config: &TuiConfig,
+    config: &Config,
     hidden: bool,
 ) -> Result<Option<(String, Backend, Output)>> {
+    if !stdout().is_terminal() {
+        bail!("otp tui needs a terminal");
+    }
     // Listing may ask for the master password, so it happens before the TUI starts.
     let rows = stores.list(only)?;
-    if rows.is_empty() {
-        bail!("no entries; add one with `otp insert`");
-    }
     let mut app = App::new(rows);
-    app.group_digits = config.group_digits;
+    app.group_digits = config.tui.group_digits;
     app.hide_code = hidden;
-    let mut terminal = ratatui::init();
+    // Like `otp insert`: --pass/--native, then the `backend` setting, then native.
+    app.target = only.unwrap_or(Backend::Native);
+    let mut terminal = ratatui::try_init().context("cannot start the TUI")?;
     // Where the terminal supports it (kitty keyboard protocol), Ctrl+I and Ctrl+? are
     // reported as themselves instead of as Tab and Backspace.
     let enhanced = supports_keyboard_enhancement().unwrap_or(false)
@@ -55,7 +58,7 @@ pub fn run(
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )
         .is_ok();
-    let result = event_loop(&mut terminal, &mut app, stores);
+    let result = event_loop(&mut terminal, &mut app, stores, config);
     if enhanced {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
@@ -70,13 +73,10 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     stores: &mut Stores,
+    config: &Config,
 ) -> Result<Option<(usize, Output)>> {
-    let mut fetch = |name: &str, backend: Backend| -> Result<Entry> {
-        let store = stores.get(backend)?.context("store is unavailable")?;
-        store.get(name)?.context("entry not found")
-    };
     loop {
-        app.load_selected(&mut fetch);
+        app.load_selected(&mut |name, backend| fetch(stores, name, backend));
         terminal.draw(|frame| app.render(frame, SystemTime::now()))?;
         // Wake up regularly so TOTP codes and countdowns stay current.
         if !event::poll(Duration::from_millis(250))? {
@@ -85,14 +85,30 @@ fn event_loop(
         // Drain pending input before decrypting anything, so key repeat stays responsive.
         loop {
             if let Event::Key(key) = event::read()? {
-                match app.handle_key(key) {
-                    Action::None => {}
-                    Action::Quit => return Ok(None),
-                    Action::Copy(index, output) => return Ok(Some((index, output))),
+                // Store operations answer with the next action, until there is none.
+                let mut action = app.handle_key(key);
+                loop {
+                    action = match action {
+                        Action::None => break,
+                        Action::Quit => return Ok(None),
+                        Action::Copy(index, output) => return Ok(Some((index, output))),
+                        Action::CheckName(name) => {
+                            app.name_checked(check_name(stores, app.target, &name))
+                        }
+                        Action::Capture => {
+                            // Show the instructions before the capture tool takes over.
+                            terminal.draw(|frame| app.render(frame, SystemTime::now()))?;
+                            let uri = qr::capture(&config.capture_command)
+                                .and_then(qr::find_otpauth_uri)
+                                .map_err(anyhow::Error::from);
+                            app.captured(uri)
+                        }
+                        Action::Save(name, otp) => app.saved(save(stores, app.target, &name, otp)),
+                    };
                 }
                 // These windows act on the entry: decrypt it before the next key.
                 if matches!(app.mode, Mode::Inspect | Mode::QrCode) {
-                    app.load_selected(&mut fetch);
+                    app.load_selected(&mut |name, backend| fetch(stores, name, backend));
                 }
             }
             if !event::poll(Duration::ZERO)? {
@@ -102,12 +118,46 @@ fn event_loop(
     }
 }
 
+fn fetch(stores: &mut Stores, name: &str, backend: Backend) -> Result<Entry> {
+    let store = stores.get(backend)?.context("store is unavailable")?;
+    store.get(name)?.context("entry not found")
+}
+
+/// Checks that a new entry can be named `name`: names are unique across stores. Never
+/// prompts for the master password (see [`Stores::contains_quietly`]).
+fn check_name(stores: &mut Stores, target: Backend, name: &str) -> Result<()> {
+    let other = match target {
+        Backend::Pass => Backend::Native,
+        Backend::Native => Backend::Pass,
+    };
+    if stores.contains_quietly(other, name)? {
+        bail!("{name} already exists in the {other} store");
+    }
+    if stores.contains_quietly(target, name)? {
+        bail!("{name} already exists");
+    }
+    Ok(())
+}
+
+fn save(stores: &mut Stores, target: Backend, name: &str, otp: OtpSecret) -> Result<Entry> {
+    check_name(stores, target, name)?;
+    let entry = Entry::new(otp);
+    stores.get_or_create_quietly(target)?.put(name, &entry)?;
+    Ok(entry)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     None,
     Quit,
     /// Copy something of `rows[index]` and quit.
     Copy(usize, Output),
+    /// Check that a new entry can have this name, then call [`App::name_checked`].
+    CheckName(String),
+    /// Capture a QR code on screen, then call [`App::captured`].
+    Capture,
+    /// Store a new entry, then call [`App::saved`].
+    Save(String, OtpSecret),
 }
 
 /// Which window has the focus.
@@ -118,6 +168,28 @@ enum Mode {
     Inspect,
     /// The QR code of the selected entry.
     QrCode,
+    /// The new entry form (Ctrl-N).
+    New,
+}
+
+/// Steps of the new entry form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Name,
+    /// Choosing between an otpauth URI, a base32 secret and a QR code.
+    Source,
+    Uri,
+    Secret,
+    Capturing,
+}
+
+struct NewEntry {
+    step: Step,
+    /// The confirmed name, once past the first step.
+    name: String,
+    /// The text being typed: the name, URI or secret.
+    input: Zeroizing<String>,
+    error: Option<String>,
 }
 
 /// Ctrl+? (kitty protocol), Ctrl+/ (sent as Ctrl+7 by legacy terminals) or F1.
@@ -148,6 +220,11 @@ pub struct App {
     list: ListState,
     /// Decrypted entries (or the error), by index into `rows`.
     loaded: HashMap<usize, Result<Entry, String>>,
+    /// Where new entries are stored.
+    target: Backend,
+    new: Option<NewEntry>,
+    /// Shown in place of the key hints until the next key.
+    status: Option<String>,
 }
 
 impl App {
@@ -162,6 +239,9 @@ impl App {
             visible: Vec::new(),
             list: ListState::default(),
             loaded: HashMap::new(),
+            target: Backend::Native,
+            new: None,
+            status: None,
         };
         app.refilter();
         app
@@ -203,8 +283,10 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return Action::Quit;
         }
+        self.status = None;
         match self.mode {
             Mode::List => {}
+            Mode::New => return self.handle_new_key(key, ctrl),
             Mode::Help => {
                 if key.code == KeyCode::Esc {
                     self.mode = Mode::List;
@@ -251,6 +333,17 @@ impl App {
             self.open_qrcode();
             return Action::None;
         }
+        if ctrl && key.code == KeyCode::Char('n') {
+            // Start from the filter: searching for a missing entry, then creating it.
+            self.new = Some(NewEntry {
+                step: Step::Name,
+                name: String::new(),
+                input: Zeroizing::new(self.filter.clone()),
+                error: None,
+            });
+            self.mode = Mode::New;
+            return Action::None;
+        }
         // Legacy terminals send Ctrl-H as 0x08, distinct from Backspace (0x7F).
         if ctrl && key.code == KeyCode::Char('h') {
             self.hide_code = !self.hide_code;
@@ -265,9 +358,7 @@ impl App {
                 };
             }
             KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('p') if ctrl => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
-            KeyCode::Char('n') if ctrl => self.move_selection(1),
             KeyCode::Backspace => {
                 self.filter.pop();
                 self.refilter();
@@ -283,6 +374,157 @@ impl App {
             _ => {}
         }
         Action::None
+    }
+
+    fn handle_new_key(&mut self, key: KeyEvent, ctrl: bool) -> Action {
+        let Some(form) = self.new.as_mut() else {
+            self.mode = Mode::List;
+            return Action::None;
+        };
+        if key.code == KeyCode::Esc {
+            self.close_new();
+            return Action::None;
+        }
+        match form.step {
+            Step::Source => {
+                form.step = match key.code {
+                    KeyCode::Char('u') if !ctrl => Step::Uri,
+                    KeyCode::Char('s') if !ctrl => Step::Secret,
+                    KeyCode::Char('q') if !ctrl => {
+                        form.step = Step::Capturing;
+                        form.error = None;
+                        return Action::Capture;
+                    }
+                    _ => return Action::None,
+                };
+                form.input.clear();
+                form.error = None;
+                return Action::None;
+            }
+            Step::Capturing => return Action::None,
+            Step::Name | Step::Uri | Step::Secret => {}
+        }
+        match key.code {
+            KeyCode::Enter => return self.submit(),
+            KeyCode::Backspace => {
+                form.input.pop();
+            }
+            KeyCode::Char('u') if ctrl => form.input.clear(),
+            KeyCode::Char(c) if !ctrl => form.input.push(c),
+            _ => return Action::None,
+        }
+        form.error = None;
+        Action::None
+    }
+
+    /// Validates the current step of the new entry form.
+    fn submit(&mut self) -> Action {
+        let Some(form) = self.new.as_mut() else {
+            return Action::None;
+        };
+        let parsed = match form.step {
+            Step::Name => {
+                let name = form.input.trim().to_string();
+                return match validate_name(&name) {
+                    Ok(()) => {
+                        form.name = name.clone();
+                        Action::CheckName(name)
+                    }
+                    Err(e) => {
+                        form.error = Some(e.to_string());
+                        Action::None
+                    }
+                };
+            }
+            Step::Uri => OtpSecret::from_uri(&form.input),
+            // Like `otp insert --secret` with its defaults.
+            Step::Secret => {
+                OtpSecret::from_base32(&form.input, Kind::Totp { period: 30 }).map(|mut otp| {
+                    crate::label_from_name(&mut otp, &form.name);
+                    otp
+                })
+            }
+            Step::Source | Step::Capturing => return Action::None,
+        };
+        match parsed {
+            Ok(otp) => Action::Save(form.name.clone(), otp),
+            Err(e) => {
+                form.error = Some(e.to_string());
+                Action::None
+            }
+        }
+    }
+
+    /// The answer to [`Action::CheckName`].
+    pub fn name_checked(&mut self, result: Result<()>) -> Action {
+        if let Some(form) = self.new.as_mut() {
+            match result {
+                Ok(()) => {
+                    form.step = Step::Source;
+                    form.input.clear();
+                }
+                Err(e) => form.error = Some(format!("{e:#}")),
+            }
+        }
+        Action::None
+    }
+
+    /// The answer to [`Action::Capture`]: the otpauth URI found on screen.
+    pub fn captured(&mut self, uri: Result<Zeroizing<String>>) -> Action {
+        let Some(form) = self.new.as_mut() else {
+            return Action::None;
+        };
+        let otp = uri.and_then(|uri| Ok(OtpSecret::from_uri(&uri)?));
+        match otp {
+            Ok(otp) => Action::Save(form.name.clone(), otp),
+            Err(e) => {
+                form.step = Step::Source;
+                form.error = Some(format!("{e:#}"));
+                Action::None
+            }
+        }
+    }
+
+    /// The answer to [`Action::Save`]: on success the new entry is added and selected.
+    pub fn saved(&mut self, entry: Result<Entry>) -> Action {
+        let Some(form) = self.new.as_mut() else {
+            return Action::None;
+        };
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                if form.step == Step::Capturing {
+                    form.step = Step::Source;
+                }
+                form.error = Some(format!("{e:#}"));
+                return Action::None;
+            }
+        };
+        let row = (form.name.clone(), self.target);
+        let index = self.rows.partition_point(|existing| existing < &row);
+        self.rows.insert(index, row);
+        // Indices after the new row moved by one.
+        self.loaded = self
+            .loaded
+            .drain()
+            .map(|(i, loaded)| (if i >= index { i + 1 } else { i }, loaded))
+            .collect();
+        self.loaded.insert(index, Ok(entry));
+        let name = &self.rows[index].0;
+        if !name.to_lowercase().contains(&self.filter.to_lowercase()) {
+            self.filter.clear();
+        }
+        self.status = Some(format!("Created {name} in the {} store", self.target));
+        self.refilter();
+        let position = self.visible.iter().position(|&i| i == index);
+        self.list.select(position);
+        self.close_new();
+        Action::None
+    }
+
+    fn close_new(&mut self) {
+        self.new = None;
+        self.mode = Mode::List;
     }
 
     /// `value`, or as many bullets when codes and secrets are hidden (Ctrl-H).
@@ -356,6 +598,7 @@ impl App {
             Mode::Help => render_help(frame),
             Mode::Inspect => self.render_inspect(frame, now),
             Mode::QrCode => self.render_qrcode(frame),
+            Mode::New => self.render_new(frame),
         }
     }
 
@@ -363,7 +606,12 @@ impl App {
         let title = format!(" Entries {}/{} ", self.visible.len(), self.rows.len());
         let block = Block::bordered().title(title);
         if self.visible.is_empty() {
-            let message = Paragraph::new("No match".dim()).block(block);
+            let message = if self.rows.is_empty() {
+                "No entries yet: Ctrl-N creates one"
+            } else {
+                "No match"
+            };
+            let message = Paragraph::new(message.dim()).block(block);
             frame.render_widget(message, area);
             return;
         }
@@ -459,6 +707,10 @@ impl App {
         let help = Line::from(
             " Enter copy · Tab inspect · Ctrl-R QR code · Ctrl-/ help · Esc quit ".dim(),
         );
+        let help = match &self.status {
+            Some(status) => Line::from(format!(" {status} ").green()),
+            None => help,
+        };
         let block = Block::bordered().title(" Filter ").title_bottom(help);
         let inner = block.inner(area);
         frame.render_widget(Paragraph::new(self.filter.as_str()).block(block), area);
@@ -581,6 +833,102 @@ impl App {
     }
 }
 
+impl App {
+    fn render_new(&self, frame: &mut Frame) {
+        let Some(form) = &self.new else {
+            return;
+        };
+        let footer = match form.step {
+            Step::Name | Step::Uri | Step::Secret => " Enter next · Esc cancel ",
+            Step::Source => " u, s or q · Esc cancel ",
+            Step::Capturing => "",
+        };
+        let block = Block::bordered()
+            .padding(Padding::horizontal(1))
+            .title(" New entry ")
+            .title_bottom(Line::from(footer.dim()));
+        let area = centered(frame.area(), 70, frame.area().height);
+        let inner_width = block.inner(area).width as usize;
+        let label = |text: &'static str| Span::from(format!("{text:<8} ")).dim();
+
+        // The line holding the text being typed, and that text as shown.
+        let typed = |text: &str| -> String {
+            // Keep the end visible when the text is wider than the window.
+            let room = inner_width.saturating_sub(10);
+            let count = text.chars().count();
+            text.chars().skip(count.saturating_sub(room)).collect()
+        };
+        let mut cursor = None;
+        let mut lines = Vec::new();
+        if form.step == Step::Name {
+            let shown = typed(&form.input);
+            cursor = Some((lines.len(), 9 + shown.chars().count()));
+            lines.push(Line::from(vec![label("name"), Span::from(shown)]));
+        } else {
+            lines.push(Line::from(vec![
+                label("name"),
+                Span::from(form.name.clone()),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            label("store"),
+            Span::from(self.target.to_string()),
+        ]));
+        lines.push(Line::default());
+        match form.step {
+            Step::Name => lines.push(Line::from(
+                "Folders are separated by /, e.g. google.com/alice@gmail.com".dim(),
+            )),
+            Step::Source => {
+                for (key, text) in [
+                    ("u", "paste an otpauth:// URI"),
+                    ("s", "type a base32 secret (TOTP, SHA1, 6 digits, 30s)"),
+                    ("q", "capture a QR code on screen"),
+                ] {
+                    lines.push(Line::from(vec![
+                        Span::from(format!("{key}  ")).bold(),
+                        text.into(),
+                    ]));
+                }
+            }
+            Step::Uri | Step::Secret => {
+                let what = if form.step == Step::Uri {
+                    "uri"
+                } else {
+                    "secret"
+                };
+                // Masked while codes and secrets are hidden (Ctrl-H).
+                let shown = typed(&self.mask(&form.input));
+                cursor = Some((lines.len(), 9 + shown.chars().count()));
+                lines.push(Line::from(vec![label(what), Span::from(shown)]));
+            }
+            Step::Capturing => lines.push(Line::from("Select the QR code on screen…")),
+        }
+        if let Some(error) = &form.error {
+            lines.push(Line::default());
+            lines.push(Line::from(error.as_str().red()));
+        }
+
+        let height: usize = lines
+            .iter()
+            .map(|line| line.width().div_ceil(inner_width.max(1)).max(1))
+            .sum();
+        let area = centered(frame.area(), area.width, height as u16 + 2);
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        if let Some((row, column)) = cursor {
+            let x = (inner.x + column as u16).min(inner.right().saturating_sub(1));
+            frame.set_cursor_position(Position::new(x, inner.y + row as u16));
+        }
+    }
+}
+
 /// A small centered window with a message and an "Esc back" hint.
 fn render_message(frame: &mut Frame, message: &str) {
     let area = centered(frame.area(), 50, 6);
@@ -595,14 +943,18 @@ fn render_message(frame: &mut Frame, message: &str) {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("↑ / Ctrl-P", "previous entry"),
-    ("↓ / Ctrl-N", "next entry"),
+    ("↑", "previous entry"),
+    ("↓", "next entry"),
     ("typing", "filter entries (case-insensitive)"),
     ("Backspace", "delete the last filter character"),
     ("Ctrl-U", "clear the filter"),
     ("Enter", "copy the code and quit"),
     ("Tab / Ctrl-I", "inspect the entry: secret and details"),
     ("Ctrl-R", "show the QR code (Esc goes back)"),
+    (
+        "Ctrl-N",
+        "create an entry: name, then URI, secret or QR code",
+    ),
     ("Ctrl-H", "hide or show the code and secret"),
     ("Ctrl-? / Ctrl-/ / F1", "show this help"),
     ("Esc / Ctrl-C", "quit"),
@@ -742,10 +1094,10 @@ mod tests {
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.selected(), Some(0), "stays at the top");
         app.handle_key(key(KeyCode::Down));
-        app.handle_key(ctrl('n'));
+        app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.selected(), Some(2), "stops at the bottom");
-        app.handle_key(ctrl('p'));
+        app.handle_key(key(KeyCode::Up));
         assert_eq!(app.selected(), Some(1));
 
         // The selected entry is kept when it still matches...
@@ -1058,6 +1410,133 @@ mod tests {
         assert_eq!(app.display_code("1234567"), "••• ••••");
         app.handle_key(ctrl('h'));
         assert_eq!(app.display_code("123456"), "123 456");
+    }
+
+    const URI: &str = "otpauth://totp/Web:pm?secret=JBSWY3DPEHPK3PXP&issuer=Web";
+
+    #[test]
+    fn new_entry_from_a_uri() {
+        let mut app = app(&["b", "d"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        type_text(&mut app, "Web/");
+        // Ctrl-N starts from the filter.
+        app.handle_key(ctrl('n'));
+        assert_eq!(app.mode, Mode::New);
+        type_text(&mut app, "amazon.fr/pm@mkz.me");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::CheckName("Web/amazon.fr/pm@mkz.me".into())
+        );
+        app.name_checked(Ok(()));
+        assert_eq!(app.new.as_ref().unwrap().step, Step::Source);
+        app.handle_key(key(KeyCode::Char('u')));
+        type_text(&mut app, URI);
+        let Action::Save(name, otp) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a save");
+        };
+        assert_eq!(name, "Web/amazon.fr/pm@mkz.me");
+        assert_eq!(otp.issuer.as_deref(), Some("Web"));
+
+        // Saved: the row is inserted in order and selected, and the cache follows.
+        app.saved(Ok(Entry::new(otp)));
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(
+            app.rows.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["Web/amazon.fr/pm@mkz.me", "b", "d"]
+        );
+        assert_eq!(app.selected(), Some(0));
+        assert!(
+            matches!(app.loaded.get(&0), Some(Ok(entry)) if entry.otp.issuer.as_deref() == Some("Web"))
+        );
+        assert!(app.loaded.contains_key(&1), "b's cache moved with it");
+        assert_eq!(app.filter, "Web/", "the filter still matches");
+        assert!(
+            render(&mut app, SystemTime::now())
+                .contains("Created Web/amazon.fr/pm@mkz.me in the native store")
+        );
+    }
+
+    #[test]
+    fn new_entry_from_a_secret_or_qr_code() {
+        let mut app = app(&["x"]);
+        app.handle_key(ctrl('n'));
+        type_text(&mut app, "google.com/alice");
+        app.handle_key(key(KeyCode::Enter));
+        app.name_checked(Ok(()));
+        app.handle_key(key(KeyCode::Char('s')));
+        type_text(&mut app, "jbsw y3dp ehpk 3pxp");
+        let Action::Save(_, otp) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a save");
+        };
+        // Labelled like `otp insert --secret`.
+        assert_eq!(otp.issuer.as_deref(), Some("google.com"));
+        assert_eq!(otp.account.as_deref(), Some("alice"));
+        assert_eq!(otp.secret_base32(), "JBSWY3DPEHPK3PXP");
+
+        // A failed save keeps the form open with the error.
+        app.saved(Err(anyhow::anyhow!("pass: gpg failed")));
+        assert_eq!(app.mode, Mode::New);
+        assert!(render(&mut app, SystemTime::now()).contains("pass: gpg failed"));
+
+        // QR code: capture, then save; a failed capture goes back to the choice.
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(ctrl('n'));
+        type_text(&mut app, "y");
+        app.handle_key(key(KeyCode::Enter));
+        app.name_checked(Ok(()));
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Action::Capture);
+        assert!(render(&mut app, SystemTime::now()).contains("Select the QR code on screen"));
+        app.captured(Err(anyhow::anyhow!("no QR code found")));
+        assert_eq!(app.new.as_ref().unwrap().step, Step::Source);
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Action::Capture);
+        assert!(matches!(
+            app.captured(Ok(Zeroizing::new(URI.to_string()))),
+            Action::Save(name, _) if name == "y"
+        ));
+    }
+
+    #[test]
+    fn new_entry_errors_and_cancel() {
+        let mut app = app(&["taken"]);
+        app.handle_key(ctrl('n'));
+        // Invalid names are rejected before any store is asked.
+        type_text(&mut app, "../x");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+        assert!(render(&mut app, SystemTime::now()).contains("invalid entry name"));
+        // Taken names are reported by the store check.
+        app.handle_key(ctrl('u'));
+        type_text(&mut app, "taken");
+        app.handle_key(key(KeyCode::Enter));
+        app.name_checked(Err(anyhow::anyhow!("taken already exists")));
+        assert_eq!(app.new.as_ref().unwrap().step, Step::Name);
+        assert!(render(&mut app, SystemTime::now()).contains("taken already exists"));
+        // Editing clears the error.
+        type_text(&mut app, "2");
+        assert!(app.new.as_ref().unwrap().error.is_none());
+
+        // A bad URI keeps the form open; the input is masked while hidden.
+        app.handle_key(key(KeyCode::Enter));
+        app.name_checked(Ok(()));
+        app.handle_key(key(KeyCode::Char('u')));
+        type_text(&mut app, "https://nope");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+        assert!(render(&mut app, SystemTime::now()).contains("invalid otpauth URI"));
+        app.hide_code = true;
+        assert!(!render(&mut app, SystemTime::now()).contains("https://nope"));
+
+        // Esc cancels; nothing was added, and Ctrl-N no longer moves the selection.
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!((app.mode, app.rows.len()), (Mode::List, 1));
+        assert!(app.new.is_none());
+    }
+
+    #[test]
+    fn empty_store_invites_to_create() {
+        let mut app = App::new(Vec::new());
+        assert!(render(&mut app, SystemTime::now()).contains("No entries yet: Ctrl-N creates one"));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+        app.handle_key(ctrl('n'));
+        assert_eq!(app.mode, Mode::New);
     }
 
     #[test]

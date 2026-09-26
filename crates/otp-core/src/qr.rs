@@ -3,7 +3,7 @@
 use std::fs::OpenOptions;
 use std::io::{BufWriter, ErrorKind};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use image::{DynamicImage, GrayImage, ImageFormat, Luma};
 use qrcode::{EcLevel, QrCode};
@@ -79,8 +79,13 @@ pub fn capture<S: AsRef<str>>(command: &[S]) -> Result<Vec<Zeroizing<String>>> {
     let program = program.as_ref();
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("capture.png");
-    let status = command_with_file(program, args, &file)
-        .status()
+    // Keep the tool's output off the terminal (a TUI may be drawn there); its last
+    // stderr line explains a failure.
+    let output = command_with_file(program, args, &file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|e| {
             if e.kind() == ErrorKind::NotFound {
                 Error::Capture(format!("{program} not found"))
@@ -88,8 +93,14 @@ pub fn capture<S: AsRef<str>>(command: &[S]) -> Result<Vec<Zeroizing<String>>> {
                 Error::Io(e)
             }
         })?;
-    if !status.success() {
-        return Err(Error::Capture(format!("{program} failed ({status})")));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Capture(
+            match stderr.lines().rev().find(|l| !l.trim().is_empty()) {
+                Some(detail) => format!("{program} failed: {}", detail.trim()),
+                None => format!("{program} failed ({})", output.status),
+            },
+        ));
     }
     match std::fs::metadata(&file) {
         Ok(meta) if meta.len() > 0 => decode_file(&file),
@@ -290,6 +301,14 @@ mod tests {
     #[test]
     fn capture_reports_failures() {
         assert!(matches!(capture(&["false"]), Err(Error::Capture(_))));
+        // The tool's own explanation is reported.
+        let error = capture(&["sh", "-c", "echo 'slurp: selection cancelled' >&2; exit 1"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("sh failed: slurp: selection cancelled"),
+            "{error}"
+        );
         assert!(matches!(capture(&["true"]), Err(Error::Capture(_))));
         assert!(matches!(
             capture(&["/nonexistent/grimshot"]),

@@ -891,14 +891,13 @@ fn completes_folders_along_entry_paths() {
 #[cfg(feature = "tui")]
 #[test]
 fn tui_accepts_hidden_flag() {
-    // Without entries the TUI stops before taking over the terminal, which shows that
-    // the flag parses.
+    // Without a terminal the TUI refuses to start, after the flag was parsed.
     let env = Env::new();
     env.otp()
         .args(["tui", "--hidden"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no entries"));
+        .stderr(predicate::str::contains("otp tui needs a terminal"));
 }
 
 #[test]

@@ -64,8 +64,9 @@ impl PassStore {
         self
     }
 
-    /// Keeps `pass show` away from the terminal: no stdin, and gpg's stderr is captured
-    /// into the error message instead of being printed. For full-screen interfaces.
+    /// Keeps `pass show` and `pass insert` away from the terminal: no stdin for `show`,
+    /// and gpg's stderr is captured into the error message instead of being printed.
+    /// For full-screen interfaces.
     pub fn non_interactive(mut self) -> Self {
         self.interactive = false;
         self
@@ -115,12 +116,11 @@ impl PassStore {
             .map_err(|e| self.spawn_error(e))?;
         let stdout = Zeroizing::new(output.stdout);
         if !output.status.success() {
-            let diagnostics = String::from_utf8_lossy(&output.stderr);
-            let detail = diagnostics.lines().rev().find(|l| !l.trim().is_empty());
-            return Err(Error::Pass(match detail {
-                Some(detail) => format!("`pass show {pass_name}` failed: {}", detail.trim()),
-                None => format!("`pass show {pass_name}` failed ({})", output.status),
-            }));
+            return Err(failure(
+                &format!("pass show {pass_name}"),
+                output.status,
+                &output.stderr,
+            ));
         }
         String::from_utf8(stdout.to_vec())
             .map(Zeroizing::new)
@@ -133,18 +133,24 @@ impl PassStore {
             .command(&["insert", "--multiline", "--force", "--", &pass_name])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(if self.interactive {
+                Stdio::inherit()
+            } else {
+                Stdio::piped()
+            })
             .spawn()
             .map_err(|e| self.spawn_error(e))?;
         {
             let mut stdin = child.stdin.take().expect("stdin is piped");
             stdin.write_all(contents.as_bytes())?;
         }
-        let status = child.wait()?;
-        if !status.success() {
-            return Err(Error::Pass(format!(
-                "`pass insert {pass_name}` failed ({status})"
-            )));
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(failure(
+                &format!("pass insert {pass_name}"),
+                output.status,
+                &output.stderr,
+            ));
         }
         Ok(())
     }
@@ -264,6 +270,15 @@ impl Store for PassStore {
     }
 }
 
+/// A failed pass command, explained by the last line of its stderr when captured.
+fn failure(command: &str, status: std::process::ExitStatus, stderr: &[u8]) -> Error {
+    let stderr = String::from_utf8_lossy(stderr);
+    Error::Pass(match stderr.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(detail) => format!("`{command}` failed: {}", detail.trim()),
+        None => format!("`{command}` failed ({status})"),
+    })
+}
+
 fn split(contents: &str) -> (&str, &str) {
     contents.split_once('\n').unwrap_or((contents, ""))
 }
@@ -339,6 +354,29 @@ mod tests {
         assert!(store.contains("google.com/alice").unwrap());
         assert!(!store.contains("google.com/bob").unwrap());
         assert!(store.contains("../etc").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_interactive_failures_explain_themselves() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("pass");
+        fs::write(
+            &script,
+            "#!/bin/sh\necho 'gpg: public key not found' >&2\nexit 2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut store = PassStore::new(Some(dir.path().join("store")))
+            .program(&script)
+            .non_interactive();
+        let entry = Entry::new(OtpSecret::from_uri(URI).unwrap());
+        let error = store.put("x", &entry).unwrap_err().to_string();
+        assert!(
+            error.contains("`pass insert x-otp` failed: gpg: public key not found"),
+            "{error}"
+        );
     }
 
     #[test]

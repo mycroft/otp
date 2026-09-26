@@ -103,6 +103,55 @@ impl<'a> Stores<'a> {
         Ok(rows)
     }
 
+    /// Opens the native database without prompting: with the master password from
+    /// `OTP_PASSWORD` or `password_command`. Returns false if that is not possible.
+    #[cfg(feature = "tui")]
+    fn open_native_quietly(&mut self, create: bool) -> Result<bool> {
+        if self.native.is_some() {
+            return Ok(true);
+        }
+        let exists = NativeStore::exists(&self.db_path);
+        if !exists && !create {
+            return Ok(false);
+        }
+        let Some(password) = self.password.non_interactive() else {
+            return Ok(false);
+        };
+        let password = password?;
+        let store = if exists {
+            NativeStore::open(&self.db_path, password.as_bytes())
+        } else {
+            NativeStore::create(&self.db_path, password.as_bytes())
+        };
+        self.native = Some(store.with_context(|| format!("opening {}", self.db_path.display()))?);
+        Ok(true)
+    }
+
+    /// Like [`Stores::contains`], but never prompts: a native database that would need
+    /// the master password to be typed is not searched.
+    #[cfg(feature = "tui")]
+    pub fn contains_quietly(&mut self, backend: Backend, name: &str) -> Result<bool> {
+        match backend {
+            Backend::Pass => Ok(self.pass.contains(name)?),
+            Backend::Native => match self.open_native_quietly(false)? {
+                true => Ok(self.native.as_ref().expect("opened").contains(name)?),
+                false => Ok(false),
+            },
+        }
+    }
+
+    /// Like [`Stores::get_or_create`], but never prompts.
+    #[cfg(feature = "tui")]
+    pub fn get_or_create_quietly(&mut self, backend: Backend) -> Result<&mut dyn Store> {
+        if backend == Backend::Native && !self.open_native_quietly(true)? {
+            bail!(
+                "the master password cannot be asked for here; set password_command, \
+                 or add this entry with `otp insert`"
+            );
+        }
+        Ok(self.get(backend)?.expect("store is open"))
+    }
+
     pub fn native_for_passwd(&mut self) -> Result<&mut NativeStore> {
         if !NativeStore::exists(&self.db_path) {
             bail!("no database at {}", self.db_path.display());

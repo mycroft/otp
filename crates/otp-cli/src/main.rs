@@ -280,7 +280,7 @@ fn run(cli: Cli) -> Result<()> {
         #[cfg(feature = "tui")]
         Some(Command::Tui { hidden, only }) => {
             let hidden = hidden || config.tui.hidden;
-            match tui::run(&mut stores, only.only(default), &config.tui, hidden)? {
+            match tui::run(&mut stores, only.only(default), &config, hidden)? {
                 // Copying goes through `otp -c` so HOTP counters are persisted the same way.
                 Some((name, backend, output)) => {
                     code(&mut stores, &config, CodeArgs::copy(name, backend, output))
@@ -409,15 +409,21 @@ fn read_otp(config: &Config, args: &InsertArgs) -> Result<OtpSecret> {
     let mut otp = OtpSecret::from_base32(&secret, kind)?;
     otp.algorithm = args.algorithm.into();
     otp.digits = args.digits;
-    match args.name.rsplit_once('/') {
+    label_from_name(&mut otp, &args.name);
+    otp.validate()?;
+    Ok(otp)
+}
+
+/// Labels a secret entered without an otpauth URI after its entry name: the folder is
+/// the issuer, the last component the account (`google.com/alice` → issuer google.com, account alice).
+fn label_from_name(otp: &mut OtpSecret, name: &str) {
+    match name.rsplit_once('/') {
         Some((issuer, account)) => {
             otp.issuer = Some(issuer.to_string());
             otp.account = Some(account.to_string());
         }
-        None => otp.account = Some(args.name.clone()),
+        None => otp.account = Some(name.to_string()),
     }
-    otp.validate()?;
-    Ok(otp)
 }
 
 /// Prints the entries starting with `prefix` and returns how many rows were printed.

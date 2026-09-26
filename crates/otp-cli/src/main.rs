@@ -618,11 +618,16 @@ fn copy_to_clipboard(config: &Config, text: &str) -> Result<()> {
         .stdin(Stdio::piped())
         .spawn()
         .with_context(|| format!("running clipboard command {program:?}"))?;
-    child
+    let written = child
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(text.as_bytes())?;
+        .write_all(text.as_bytes());
+    // A tool that exits before reading is better explained by its exit status.
+    match written {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.into()),
+        _ => {}
+    }
     let status = child.wait()?;
     if !status.success() {
         bail!("clipboard command {program:?} failed ({status})");

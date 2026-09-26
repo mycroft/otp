@@ -143,7 +143,12 @@ impl PassStore {
             .map_err(|e| self.spawn_error(e))?;
         {
             let mut stdin = child.stdin.take().expect("stdin is piped");
-            stdin.write_all(contents.as_bytes())?;
+            // If pass exits before reading (e.g. it failed at once), its exit status and
+            // stderr explain why better than the broken pipe.
+            match stdin.write_all(contents.as_bytes()) {
+                Err(e) if e.kind() != ErrorKind::BrokenPipe => return Err(e.into()),
+                _ => {}
+            }
         }
         let output = child.wait_with_output()?;
         if !output.status.success() {

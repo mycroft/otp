@@ -254,13 +254,15 @@ fn run(cli: Cli) -> Result<()> {
         }
         Some(Command::Passwd) => passwd(&mut stores),
         #[cfg(feature = "tui")]
-        Some(Command::Tui { only }) => match tui::run(&mut stores, only.only(default))? {
-            // Copying goes through `otp -c` so HOTP counters are persisted the same way.
-            Some((name, backend, output)) => {
-                code(&mut stores, &config, CodeArgs::copy(name, backend, output))
+        Some(Command::Tui { only }) => {
+            match tui::run(&mut stores, only.only(default), &config.tui)? {
+                // Copying goes through `otp -c` so HOTP counters are persisted the same way.
+                Some((name, backend, output)) => {
+                    code(&mut stores, &config, CodeArgs::copy(name, backend, output))
+                }
+                None => Ok(()),
             }
-            None => Ok(()),
-        },
+        }
     }
 }
 

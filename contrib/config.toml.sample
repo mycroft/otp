@@ -36,3 +36,9 @@ clipboard_command = ["wl-copy"]
 
 # pass(1) store directory. Default: $PASSWORD_STORE_DIR or ~/.password-store.
 #password_store_dir = "~/.password-store"
+
+# `otp tui` settings (ignored by builds without the tui feature).
+[tui]
+# Show codes as "123 456" instead of "123456". Off so that selecting a code with
+# the mouse copies it without a space.
+group_digits = false

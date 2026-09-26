@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListState, Padding, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
+use crate::config::TuiConfig;
 use crate::stores::Stores;
 
 /// What to copy for the picked entry.
@@ -33,6 +34,7 @@ pub enum Output {
 pub fn run(
     stores: &mut Stores,
     only: Option<Backend>,
+    config: &TuiConfig,
 ) -> Result<Option<(String, Backend, Output)>> {
     // Listing may ask for the master password, so it happens before the TUI starts.
     let rows = stores.list(only)?;
@@ -40,6 +42,7 @@ pub fn run(
         bail!("no entries; add one with `otp insert`");
     }
     let mut app = App::new(rows);
+    app.group_digits = config.group_digits;
     let mut terminal = ratatui::init();
     // Where the terminal supports it (kitty keyboard protocol), Ctrl+I and Ctrl+? are
     // reported as themselves instead of as Tab and Backspace.
@@ -134,6 +137,8 @@ pub struct App {
     qr_return: Mode,
     /// Codes are masked in the code column (toggled with Ctrl-H).
     hide_code: bool,
+    /// Codes are shown as `123 456` (the `[tui] group_digits` setting).
+    group_digits: bool,
     filter: String,
     /// Indices into `rows` matching the filter.
     visible: Vec<usize>,
@@ -149,6 +154,7 @@ impl App {
             mode: Mode::List,
             qr_return: Mode::List,
             hide_code: false,
+            group_digits: false,
             filter: String::new(),
             visible: Vec::new(),
             list: ListState::default(),
@@ -285,6 +291,19 @@ impl App {
         }
     }
 
+    /// A code as displayed: masked when hidden, split in two when `group_digits` is set.
+    fn display_code(&self, code: &str) -> String {
+        let code = self.mask(code);
+        if !self.group_digits {
+            return code;
+        }
+        // Split by characters: masked codes are multi-byte bullets.
+        let middle = code.chars().count() / 2;
+        let left: String = code.chars().take(middle).collect();
+        let right: String = code.chars().skip(middle).collect();
+        format!("{left} {right}")
+    }
+
     /// Shows the QR code of the selected entry; Esc comes back to the current window.
     fn open_qrcode(&mut self) {
         if self.selected().is_some() {
@@ -391,7 +410,7 @@ impl App {
                 // Generating a TOTP code does not modify the entry.
                 let code = entry.otp.clone().generate(now);
                 let remaining = code.valid_for.map_or(0, |d| d.as_secs());
-                let line = Line::from(group_digits(&self.mask(&code.value)).bold()).centered();
+                let line = Line::from(self.display_code(&code.value).bold()).centered();
                 frame.render_widget(Paragraph::new(vec![Line::default(), line]), code_area);
                 let gauge = Gauge::default()
                     .ratio(remaining as f64 / f64::from(period))
@@ -478,10 +497,7 @@ impl App {
                         // Generating a TOTP code does not modify the entry.
                         let code = otp.clone().generate(now);
                         let remaining = code.valid_for.map_or(0, |d| d.as_secs());
-                        format!(
-                            "{} ({remaining}s left)",
-                            group_digits(&self.mask(&code.value))
-                        )
+                        format!("{} ({remaining}s left)", self.display_code(&code.value))
                     }
                     Kind::Hotp { .. } => "- (Enter in the list generates one)".into(),
                 };
@@ -625,14 +641,6 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
-}
-
-/// Splits a code in two halves for readability: `123456` → `123 456`.
-fn group_digits(code: &str) -> String {
-    let middle = code.chars().count() / 2;
-    let left: String = code.chars().take(middle).collect();
-    let right: String = code.chars().skip(middle).collect();
-    format!("{left} {right}")
 }
 
 #[cfg(test)]
@@ -789,7 +797,7 @@ mod tests {
         let screen = render(&mut app, UNIX_EPOCH + Duration::from_secs(59));
         assert!(screen.contains("Entries 2/2"), "{screen}");
         assert!(screen.contains("> google.com/alice"), "{screen}");
-        assert!(screen.contains("9428 7082"), "{screen}");
+        assert!(screen.contains("94287082"), "{screen}");
         assert!(screen.contains("1s"), "{screen}");
         assert!(screen.contains("issuer  Google"), "{screen}");
         assert!(screen.contains("account alice@gmail.com"), "{screen}");
@@ -1000,7 +1008,7 @@ mod tests {
         app.handle_key(ctrl('h'));
         let screen = render(&mut app, at_59);
         assert!(screen.contains("Code (hidden)"), "{screen}");
-        assert!(screen.contains("•••• ••••"), "{screen}");
+        assert!(screen.contains("••••••••"), "{screen}");
         assert!(!screen.contains("9428"), "{screen}");
         assert!(screen.contains("1s"), "the countdown stays: {screen}");
         // Enter still copies the (hidden) code.
@@ -1011,13 +1019,42 @@ mod tests {
 
         app.handle_key(ctrl('h'));
         let screen = render(&mut app, at_59);
-        assert!(screen.contains("9428 7082"), "{screen}");
+        assert!(screen.contains("94287082"), "{screen}");
         assert!(!screen.contains("hidden"), "{screen}");
 
         // Backspace edits the filter and leaves the code visible.
         type_text(&mut app, "a");
         app.handle_key(key(KeyCode::Backspace));
         assert!(!app.hide_code);
+    }
+
+    #[test]
+    fn group_digits_setting_splits_codes() {
+        let mut app = app(&["google.com/alice"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        let at_59 = UNIX_EPOCH + Duration::from_secs(59);
+        // Off by default: one unbroken code.
+        assert!(render(&mut app, at_59).contains("94287082"));
+
+        app.group_digits = true;
+        let screen = render(&mut app, at_59);
+        assert!(screen.contains("9428 7082"), "{screen}");
+        app.handle_key(key(KeyCode::Tab));
+        let screen = render_at(&mut app, at_59, 80, 24);
+        assert!(
+            screen.contains("code       9428 7082 (1s left)"),
+            "{screen}"
+        );
+        // Masked codes are split by characters, not bytes (bullets are multi-byte).
+        app.handle_key(ctrl('h'));
+        let screen = render_at(&mut app, at_59, 80, 24);
+        assert!(
+            screen.contains("code       •••• •••• (1s left)"),
+            "{screen}"
+        );
+        assert_eq!(app.display_code("1234567"), "••• ••••");
+        app.handle_key(ctrl('h'));
+        assert_eq!(app.display_code("123456"), "123 456");
     }
 
     #[test]
@@ -1029,10 +1066,7 @@ mod tests {
         let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 
         let screen = render_at(&mut app, at_59, 80, 24);
-        assert!(
-            screen.contains("code       9428 7082 (1s left)"),
-            "{screen}"
-        );
+        assert!(screen.contains("code       94287082 (1s left)"), "{screen}");
         assert!(screen.contains(&format!("secret     {secret}")), "{screen}");
 
         // Ctrl-H works from the inspect window too.
@@ -1040,10 +1074,7 @@ mod tests {
         let screen = render_at(&mut app, at_59, 80, 24);
         assert!(!screen.contains("GEZDGNBV"), "{screen}");
         assert!(!screen.contains("9428"), "{screen}");
-        assert!(
-            screen.contains("code       •••• •••• (1s left)"),
-            "{screen}"
-        );
+        assert!(screen.contains("code       •••••••• (1s left)"), "{screen}");
         assert!(
             screen.contains(&format!("secret     {}", "•".repeat(32))),
             "{screen}"
@@ -1073,14 +1104,5 @@ mod tests {
             screen.contains("code       - (Enter in the list generates one)"),
             "{screen}"
         );
-    }
-
-    #[test]
-    fn groups_digits() {
-        assert_eq!(group_digits("123456"), "123 456");
-        assert_eq!(group_digits("12345678"), "1234 5678");
-        assert_eq!(group_digits("1234567"), "123 4567");
-        // Masked codes are grouped by characters, not bytes.
-        assert_eq!(group_digits("•••••••"), "••• ••••");
     }
 }

@@ -840,6 +840,20 @@ fn qrcode_needs_an_exact_entry() {
 }
 
 #[test]
+fn tui_section_is_accepted_and_validated() {
+    // Valid in every build, with or without the `tui` feature.
+    let env = Env::new();
+    env.write_config("[tui]\ngroup_digits = true\n");
+    env.otp().arg("list").assert().success();
+    env.write_config("[tui]\ngroup_digit = true\n");
+    env.otp()
+        .arg("list")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("group_digit"));
+}
+
+#[test]
 fn completes_folders_along_entry_paths() {
     let env = Env::new();
     fs::create_dir_all(env.pass_dir().join("Web/amazon.fr")).unwrap();

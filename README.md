@@ -113,6 +113,8 @@ with `--pass` / `--native`:
   every parameter and the `otpauth://` URI. There, `s` copies the secret and `u` copies the URI (then
   otp quits), `r` shows the QR code (Esc goes back), and Esc closes it.
 - Ctrl-R shows the selected entry's QR code directly; Esc goes back to the list.
+- Codes are shown as one unbroken string, so a mouse selection copies them as they are;
+  set `group_digits = true` under `[tui]` in the configuration to show `123 456`.
 - Ctrl-H hides or shows the code, and the secret in the inspect window (the countdown
   stays, and copying still gives the real values). It works in the inspect window too.
 - Ctrl-?, Ctrl-/ or F1 shows the help with all shortcuts; Esc closes it.
@@ -162,6 +164,9 @@ capture_command = ["grimshot", "save", "area", "{file}"]   # {file}: PNG to writ
 clipboard_command = ["wl-copy"]
 qrcode_viewer_command = ["chafa", "{file}"]   # for otp --qrcode; unset: drawn by otp
 password_store_dir = "~/.password-store"
+
+[tui]
+group_digits = false      # true: show codes as "123 456" instead of "123456"
 ```
 
 Environment variables:

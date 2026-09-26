@@ -24,6 +24,18 @@ pub struct Config {
     pub clipboard_command: Vec<String>,
     /// pass store directory. Defaults to `$PASSWORD_STORE_DIR` or `~/.password-store`.
     pub password_store_dir: Option<PathBuf>,
+    /// `[tui]` section. Accepted even without the `tui` feature, so one config file
+    /// works with every build.
+    pub tui: TuiConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub struct TuiConfig {
+    /// Show codes as `123 456` instead of `123456`. Off by default so that selecting a
+    /// code with the mouse copies it without a space.
+    pub group_digits: bool,
 }
 
 impl Default for Config {
@@ -39,6 +51,7 @@ impl Default for Config {
             qrcode_viewer_command: None,
             clipboard_command: vec!["wl-copy".into()],
             password_store_dir: None,
+            tui: TuiConfig::default(),
         }
     }
 }

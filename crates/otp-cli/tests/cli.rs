@@ -1064,3 +1064,78 @@ fn concurrent_inserts_of_one_name_keep_the_first() {
         .success()
         .stdout(predicate::str::contains("secret=GEZDGNBVGY3TQOJQ"));
 }
+
+#[test]
+fn crafted_labels_are_rejected_without_being_echoed() {
+    let env = Env::new();
+    for uri in [
+        "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&issuer=%1b%5b2J",
+        "otpauth://totp/Issuer:%1b%5d0;PWNED%07?secret=JBSWY3DPEHPK3PXP",
+        "otpauth://totp/Bank:%e2%80%aemoc.knab?secret=JBSWY3DPEHPK3PXP",
+    ] {
+        let output = env
+            .otp()
+            .args(["insert", "x"])
+            .write_stdin(format!("{uri}\n"))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("control or bidirectional"))
+            .get_output()
+            .clone();
+        assert!(!output.stderr.contains(&0x1b), "{uri}: escape echoed");
+    }
+    // The same check covers --issuer and --account, with a URI or a secret.
+    env.otp()
+        .args(["insert", "y", "--issuer", "\u{1b}]52;c;cHduZWQ=\u{7}"])
+        .write_stdin(format!("{HOTP_URI}\n"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("issuer contains"));
+    env.otp()
+        .args(["insert", "y", "--secret", "--account", "\u{202e}evil"])
+        .write_stdin("JBSWY3DPEHPK3PXP\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("account contains"));
+    // And a QR code carrying such a URI.
+    let png = env.path("evil.png");
+    write_qr_png(&png, "otpauth://totp/%1b%5b2J:a?secret=JBSWY3DPEHPK3PXP");
+    env.otp()
+        .args(["insert", "z", &format!("--qrcode={}", png.display())])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("control or bidirectional"));
+    env.otp().arg("list").assert().success().stdout("");
+
+    // Names with bidi overrides are refused too.
+    env.otp()
+        .args(["insert", "\u{202e}moc.elgoog"])
+        .write_stdin(format!("{HOTP_URI}\n"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid entry name"));
+}
+
+#[test]
+fn show_escapes_labels_saved_by_older_versions() {
+    use otp_core::store::{NativeStore, Store};
+    use otp_core::{Entry, Kind, OtpSecret};
+
+    // Before labels were validated, such an entry could be saved.
+    let env = Env::new();
+    let mut store = NativeStore::create(env.path("data/otp.db"), b"correct horse").unwrap();
+    let mut otp = OtpSecret::from_base32("JBSWY3DPEHPK3PXP", Kind::Totp { period: 30 }).unwrap();
+    otp.issuer = Some("\u{1b}]0;PWNED\u{7}".into());
+    otp.account = Some("\u{1b}[2J".into());
+    store.put("old", &Entry::new(otp)).unwrap();
+
+    let output = env.otp().args(["show", "old"]).assert().success();
+    let stdout = &output.get_output().stdout;
+    assert!(!stdout.contains(&0x1b), "escape printed raw");
+    let stdout = String::from_utf8_lossy(stdout);
+    assert!(
+        stdout.contains("issuer:    \\u{1b}]0;PWNED\\u{7}"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("account:   \\u{1b}[2J"), "{stdout}");
+}

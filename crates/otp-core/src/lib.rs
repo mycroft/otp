@@ -12,6 +12,6 @@ pub mod qr;
 pub mod store;
 mod uri;
 
-pub use entry::{Entry, Metadata, validate_name};
+pub use entry::{Entry, Metadata, is_unsafe_char, validate_name};
 pub use error::{Error, Result};
 pub use otp::{Algorithm, Code, Kind, OtpSecret};

@@ -44,6 +44,17 @@ fn now() -> OffsetDateTime {
     now.replace_nanosecond(0).unwrap_or(now)
 }
 
+/// Whether `c` could act on a terminal or disguise text when printed: C0 and C1 control
+/// characters (escape sequences start with ESC or CSI), DEL, and the Unicode bidirectional
+/// overrides, isolates and marks, which can make text display in a misleading order.
+pub fn is_unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
 /// Checks that an entry name is a safe, pass-compatible relative path such as
 /// `google.com/alice@gmail.com`.
 pub fn validate_name(name: &str) -> Result<()> {
@@ -59,8 +70,11 @@ pub fn validate_name(name: &str) -> Result<()> {
     if name.starts_with('-') {
         return invalid("name must not start with '-'");
     }
-    if name.chars().any(|c| c.is_control() || c == '\\') {
-        return invalid("name must not contain control characters or backslashes");
+    if name.chars().any(|c| is_unsafe_char(c) || c == '\\') {
+        return invalid(
+            "name must not contain control characters, bidirectional formatting \
+             characters or backslashes",
+        );
     }
     for component in name.split('/') {
         match component {
@@ -106,8 +120,24 @@ mod tests {
             "a/.git",
             "a\\b",
             "a\nb",
+            "a\u{1b}[2Jb",
+            "\u{202E}gro.elgoog",
+            "a\u{2066}b",
+            "a\u{9b}b",
         ] {
             assert!(validate_name(name).is_err(), "{name:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn unsafe_chars() {
+        for c in [
+            '\u{1b}', '\u{7}', '\u{7f}', '\u{9b}', '\u{202E}', '\u{2067}', '\u{200F}',
+        ] {
+            assert!(is_unsafe_char(c), "{c:?}");
+        }
+        for c in ['a', 'é', '@', ' ', '日', '🔑', '\u{200D}'] {
+            assert!(!is_unsafe_char(c), "{c:?}");
         }
     }
 

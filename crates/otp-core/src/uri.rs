@@ -182,6 +182,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_terminal_escapes_and_bidi_in_labels() {
+        for uri in [
+            // Clear screen, in the issuer parameter.
+            "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&issuer=%1b%5b2J",
+            // Set window title, in the label's account.
+            "otpauth://totp/Issuer:%1b%5d0;PWNED%07?secret=JBSWY3DPEHPK3PXP",
+            // OSC 52 clipboard write, in the label's issuer.
+            "otpauth://totp/%1b%5d52;c;cHduZWQ=%07:alice?secret=JBSWY3DPEHPK3PXP",
+            // C1 CSI.
+            "otpauth://totp/a%c2%9b2Jb?secret=JBSWY3DPEHPK3PXP",
+            // Right-to-left override.
+            "otpauth://totp/Bank:%e2%80%aemoc.knab?secret=JBSWY3DPEHPK3PXP",
+        ] {
+            let error = OtpSecret::from_uri(uri).unwrap_err().to_string();
+            assert!(error.contains("control or bidirectional"), "{uri}: {error}");
+            assert!(
+                !error.chars().any(crate::is_unsafe_char),
+                "{error:?} echoes it"
+            );
+        }
+        // Other Unicode is fine.
+        let otp = OtpSecret::from_uri(
+            "otpauth://totp/Soci%C3%A9t%C3%A9:%E6%97%A5%F0%9F%94%91?secret=JBSWY3DPEHPK3PXP",
+        )
+        .unwrap();
+        assert_eq!(otp.issuer.as_deref(), Some("Société"));
+        assert_eq!(otp.account.as_deref(), Some("日🔑"));
+    }
+
+    #[test]
     fn rejects_invalid_uris() {
         for uri in [
             "https://example.com/?secret=JBSWY3DPEHPK3PXP",

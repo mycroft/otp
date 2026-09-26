@@ -129,6 +129,20 @@ impl OtpSecret {
         if let Kind::Totp { period: 0 } = self.kind {
             return Err(Error::InvalidOtp("period must be greater than 0".into()));
         }
+        // Labels come from URIs and QR codes, so they may be crafted to be printed.
+        for (what, label) in [("issuer", &self.issuer), ("account", &self.account)] {
+            let unsafe_char = label
+                .as_deref()
+                .and_then(|label| label.chars().find(|&c| crate::is_unsafe_char(c)));
+            if let Some(c) = unsafe_char {
+                // Name the character, never echo the label: printing it is the danger.
+                return Err(Error::InvalidOtp(format!(
+                    "{what} contains a control or bidirectional formatting character \
+                     (U+{:04X})",
+                    c as u32
+                )));
+            }
+        }
         Ok(())
     }
 

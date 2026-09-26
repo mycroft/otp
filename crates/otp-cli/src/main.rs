@@ -361,6 +361,8 @@ fn insert(stores: &mut Stores, config: &Config, args: InsertArgs) -> Result<()> 
     if args.account.is_some() {
         otp.account = args.account.clone();
     }
+    // The --issuer/--account overrides go through the same checks as URI labels.
+    otp.validate()?;
     let store = stores.get_or_create(target)?;
     let entry = Entry::new(otp);
     // Without --force, fail if another process added the name while we were prompting.
@@ -465,13 +467,34 @@ fn show(stores: &mut Stores, name: &str, uri: bool, only: Option<Backend>) -> Re
     println!("name:      {name}");
     println!("store:     {backend}");
     println!("type:      {}", describe_kind(otp.kind));
-    println!("issuer:    {}", otp.issuer.as_deref().unwrap_or("-"));
-    println!("account:   {}", otp.account.as_deref().unwrap_or("-"));
+    // Labels are validated when entries are created, but entries saved by older versions
+    // may still contain control characters: never print them raw.
+    println!(
+        "issuer:    {}",
+        printable(otp.issuer.as_deref().unwrap_or("-"))
+    );
+    println!(
+        "account:   {}",
+        printable(otp.account.as_deref().unwrap_or("-"))
+    );
     println!("algorithm: {}", otp.algorithm);
     println!("digits:    {}", otp.digits);
     println!("created:   {}", timestamp(entry.meta.created_at));
     println!("updated:   {}", timestamp(entry.meta.updated_at));
     Ok(())
+}
+
+/// `text` with the characters that could act on the terminal escaped as `\u{..}`.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if otp_core::is_unsafe_char(c) {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 fn describe_kind(kind: Kind) -> String {
@@ -583,4 +606,17 @@ fn copy_to_clipboard(command: &[String], text: &str) -> Result<()> {
         bail!("clipboard command {program:?} failed ({status})");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::printable;
+
+    #[test]
+    fn printable_escapes_terminal_sequences() {
+        assert_eq!(printable("Société 日🔑"), "Société 日🔑");
+        assert_eq!(printable("\u{1b}[2J"), "\\u{1b}[2J");
+        assert_eq!(printable("\u{1b}]0;PWNED\u{7}"), "\\u{1b}]0;PWNED\\u{7}");
+        assert_eq!(printable("\u{202e}moc"), "\\u{202e}moc");
+    }
 }

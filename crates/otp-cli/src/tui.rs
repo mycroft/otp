@@ -142,7 +142,7 @@ fn check_name(stores: &mut Stores, target: Backend, name: &str) -> Result<()> {
 fn save(stores: &mut Stores, target: Backend, name: &str, otp: OtpSecret) -> Result<Entry> {
     check_name(stores, target, name)?;
     let entry = Entry::new(otp);
-    stores.get_or_create_quietly(target)?.put(name, &entry)?;
+    stores.get_or_create_quietly(target)?.insert(name, &entry)?;
     Ok(entry)
 }
 

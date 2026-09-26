@@ -70,11 +70,75 @@ struct Envelope {
     ciphertext: String,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Contents {
     entries: BTreeMap<String, Entry>,
 }
 
+/// A database file, parsed but not decrypted.
+struct Sealed {
+    params: KdfParams,
+    salt: [u8; SALT_LEN],
+    nonce: [u8; NONCE_LEN],
+    ciphertext: Vec<u8>,
+    /// The authenticated header.
+    aad: Vec<u8>,
+}
+
+impl Sealed {
+    fn read(path: &Path) -> Result<Self> {
+        let data = fs::read(path)?;
+        let envelope: Envelope = serde_json::from_slice(&data)
+            .map_err(|e| Error::DatabaseFormat(format!("{}: {e}", path.display())))?;
+        let header = &envelope.header;
+        if header.format != FORMAT || header.version != VERSION {
+            return Err(Error::DatabaseFormat(format!(
+                "{}: expected {FORMAT} version {VERSION}, found {} version {}",
+                path.display(),
+                header.format,
+                header.version
+            )));
+        }
+        if header.cipher != CIPHER || header.kdf.algorithm != KDF {
+            return Err(Error::DatabaseFormat(format!(
+                "{}: unsupported cipher {:?} or KDF {:?}",
+                path.display(),
+                header.cipher,
+                header.kdf.algorithm
+            )));
+        }
+        Ok(Sealed {
+            params: header.kdf.params,
+            salt: decode_fixed(&header.kdf.salt, "salt")?,
+            nonce: decode_fixed(&envelope.nonce, "nonce")?,
+            ciphertext: BASE64
+                .decode(envelope.ciphertext.as_bytes())
+                .map_err(|e| Error::DatabaseFormat(format!("ciphertext: {e}")))?,
+            aad: serde_json::to_vec(header)?,
+        })
+    }
+
+    fn decrypt(&self, key: &[u8; KEY_LEN]) -> Result<Contents> {
+        let plaintext = Zeroizing::new(
+            cipher(key)
+                .decrypt(
+                    &XNonce::from(self.nonce),
+                    Payload {
+                        msg: &self.ciphertext,
+                        aad: &self.aad,
+                    },
+                )
+                .map_err(|_| Error::Decrypt)?,
+        );
+        Ok(serde_json::from_slice(&plaintext)?)
+    }
+}
+
+/// The database, decrypted.
+///
+/// Reads use the copy loaded when the database was opened. Every change is made under
+/// an exclusive lock on `<path>.lock`, to the file as it is at that moment, so that
+/// changes made meanwhile by other processes are kept.
 pub struct NativeStore {
     path: PathBuf,
     params: KdfParams,
@@ -99,6 +163,8 @@ impl NativeStore {
         params: KdfParams,
     ) -> Result<Self> {
         let path = path.into();
+        // Under the lock, so two processes cannot both create the database.
+        let _lock = lock(&path)?;
         if path.exists() {
             return Err(Error::DatabaseExists(path.display().to_string()));
         }
@@ -112,58 +178,20 @@ impl NativeStore {
             key,
             contents: Contents::default(),
         };
-        store.save()?;
+        store.write(&store.contents)?;
         Ok(store)
     }
 
     /// Opens and decrypts an existing database.
     pub fn open(path: impl Into<PathBuf>, password: &[u8]) -> Result<Self> {
         let path = path.into();
-        let data = fs::read(&path)?;
-        let envelope: Envelope = serde_json::from_slice(&data)
-            .map_err(|e| Error::DatabaseFormat(format!("{}: {e}", path.display())))?;
-        let header = &envelope.header;
-        if header.format != FORMAT || header.version != VERSION {
-            return Err(Error::DatabaseFormat(format!(
-                "{}: expected {FORMAT} version {VERSION}, found {} version {}",
-                path.display(),
-                header.format,
-                header.version
-            )));
-        }
-        if header.cipher != CIPHER || header.kdf.algorithm != KDF {
-            return Err(Error::DatabaseFormat(format!(
-                "{}: unsupported cipher {:?} or KDF {:?}",
-                path.display(),
-                header.cipher,
-                header.kdf.algorithm
-            )));
-        }
-        let salt: [u8; SALT_LEN] = decode_fixed(&header.kdf.salt, "salt")?;
-        let nonce: [u8; NONCE_LEN] = decode_fixed(&envelope.nonce, "nonce")?;
-        let ciphertext = BASE64
-            .decode(envelope.ciphertext.as_bytes())
-            .map_err(|e| Error::DatabaseFormat(format!("ciphertext: {e}")))?;
-
-        let params = header.kdf.params;
-        let key = derive_key(password, &salt, params)?;
-        let aad = serde_json::to_vec(header)?;
-        let plaintext = Zeroizing::new(
-            cipher(&key)
-                .decrypt(
-                    &XNonce::from(nonce),
-                    Payload {
-                        msg: &ciphertext,
-                        aad: &aad,
-                    },
-                )
-                .map_err(|_| Error::Decrypt)?,
-        );
-        let contents: Contents = serde_json::from_slice(&plaintext)?;
+        let sealed = Sealed::read(&path)?;
+        let key = derive_key(password, &sealed.salt, sealed.params)?;
+        let contents = sealed.decrypt(&key)?;
         Ok(NativeStore {
             path,
-            params,
-            salt,
+            params: sealed.params,
+            salt: sealed.salt,
             key,
             contents,
         })
@@ -175,11 +203,42 @@ impl NativeStore {
 
     /// Re-encrypts the database under a new password (and a fresh salt).
     pub fn change_password(&mut self, password: &[u8]) -> Result<()> {
+        let _lock = lock(&self.path)?;
+        let contents = self.reload()?;
         let mut salt = [0u8; SALT_LEN];
         getrandom::fill(&mut salt).map_err(|_| Error::Rng)?;
-        self.key = derive_key(password, &salt, self.params)?;
-        self.salt = salt;
-        self.save()
+        let key = derive_key(password, &salt, self.params)?;
+        let previous = (
+            std::mem::replace(&mut self.salt, salt),
+            std::mem::replace(&mut self.key, key),
+        );
+        if let Err(e) = self.write(&contents) {
+            (self.salt, self.key) = previous;
+            return Err(e);
+        }
+        self.contents = contents;
+        Ok(())
+    }
+
+    /// Applies `change` to the database as it currently is on disk, under the lock, and
+    /// saves the result.
+    fn modify<T>(&mut self, change: impl FnOnce(&mut Contents) -> Result<T>) -> Result<T> {
+        let _lock = lock(&self.path)?;
+        let mut contents = self.reload()?;
+        let result = change(&mut contents)?;
+        self.write(&contents)?;
+        self.contents = contents;
+        Ok(result)
+    }
+
+    /// Reads the database file again. Must be called with the lock held.
+    fn reload(&self) -> Result<Contents> {
+        let sealed = Sealed::read(&self.path)?;
+        if sealed.salt != self.salt || sealed.params != self.params {
+            // Another process changed the master password: our key no longer applies.
+            return Err(Error::DatabaseChanged(self.path.display().to_string()));
+        }
+        sealed.decrypt(&self.key)
     }
 
     fn header(&self) -> Header {
@@ -195,11 +254,11 @@ impl NativeStore {
         }
     }
 
-    /// Encrypts with a fresh nonce and atomically replaces the database file.
-    fn save(&self) -> Result<()> {
+    /// Encrypts `contents` with a fresh nonce and atomically replaces the database file.
+    fn write(&self, contents: &Contents) -> Result<()> {
         let header = self.header();
         let aad = serde_json::to_vec(&header)?;
-        let plaintext = Zeroizing::new(serde_json::to_vec(&self.contents)?);
+        let plaintext = Zeroizing::new(serde_json::to_vec(contents)?);
         let mut nonce = [0u8; NONCE_LEN];
         getrandom::fill(&mut nonce).map_err(|_| Error::Rng)?;
         let ciphertext = cipher(&self.key)
@@ -217,10 +276,7 @@ impl NativeStore {
             ciphertext: BASE64.encode(&ciphertext),
         };
 
-        let dir = match self.path.parent() {
-            Some(dir) if !dir.as_os_str().is_empty() => dir,
-            _ => Path::new("."),
-        };
+        let dir = parent_dir(&self.path);
         create_private_dir(dir)?;
         // NamedTempFile is created with mode 0600.
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
@@ -251,50 +307,66 @@ impl Store for NativeStore {
 
     fn put(&mut self, name: &str, entry: &Entry) -> Result<()> {
         validate_name(name)?;
-        let previous = self
-            .contents
-            .entries
-            .insert(name.to_string(), entry.clone());
-        if let Err(e) = self.save() {
-            match previous {
-                Some(previous) => self.contents.entries.insert(name.to_string(), previous),
-                None => self.contents.entries.remove(name),
-            };
-            return Err(e);
-        }
-        Ok(())
+        self.modify(|contents| {
+            contents.entries.insert(name.to_string(), entry.clone());
+            Ok(())
+        })
+    }
+
+    fn insert(&mut self, name: &str, entry: &Entry) -> Result<()> {
+        validate_name(name)?;
+        self.modify(|contents| {
+            if contents.entries.contains_key(name) {
+                return Err(Error::EntryExists(name.to_string()));
+            }
+            contents.entries.insert(name.to_string(), entry.clone());
+            Ok(())
+        })
     }
 
     fn remove(&mut self, name: &str) -> Result<bool> {
-        let Some(previous) = self.contents.entries.remove(name) else {
-            return Ok(false);
-        };
-        if let Err(e) = self.save() {
-            self.contents.entries.insert(name.to_string(), previous);
-            return Err(e);
-        }
-        Ok(true)
+        self.modify(|contents| Ok(contents.entries.remove(name).is_some()))
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> Result<bool> {
+    fn rename(&mut self, from: &str, to: &str, replace: bool) -> Result<bool> {
         validate_name(to)?;
-        let entries = &mut self.contents.entries;
-        let Some(entry) = entries.remove(from) else {
-            return Ok(false);
-        };
-        let replaced = entries.insert(to.to_string(), entry);
         // A single save, so the entry is never missing or duplicated on disk.
-        if let Err(e) = self.save() {
-            let entries = &mut self.contents.entries;
-            let entry = entries.remove(to).expect("just inserted");
-            entries.insert(from.to_string(), entry);
-            if let Some(replaced) = replaced {
-                entries.insert(to.to_string(), replaced);
+        self.modify(|contents| {
+            let entries = &mut contents.entries;
+            if !entries.contains_key(from) {
+                return Ok(false);
             }
-            return Err(e);
-        }
-        Ok(true)
+            if !replace && entries.contains_key(to) {
+                return Err(Error::EntryExists(to.to_string()));
+            }
+            let entry = entries.remove(from).expect("checked above");
+            entries.insert(to.to_string(), entry);
+            Ok(true)
+        })
     }
+}
+
+fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    }
+}
+
+/// Takes the exclusive lock that guards changes to the database at `path`: a flock on
+/// `<path>.lock`, released when the returned file is dropped. The lock file is left in
+/// place, since removing it would let two processes lock different files.
+fn lock(path: &Path) -> Result<fs::File> {
+    create_private_dir(parent_dir(path))?;
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(&lock_path)?;
+    file.lock()?;
+    Ok(file)
 }
 
 fn cipher(key: &[u8; KEY_LEN]) -> XChaCha20Poly1305 {
@@ -461,16 +533,116 @@ mod tests {
         store.put("a/b/c", &a).unwrap();
         store.put("x", &b).unwrap();
 
-        assert!(store.rename("a/b/c", "a/b/d").unwrap());
-        assert!(!store.rename("a/b/c", "a/b/e").unwrap(), "source is gone");
-        // An existing destination is replaced.
-        assert!(store.rename("x", "a/b/d").unwrap());
-        assert!(store.rename("../escape", "y").is_ok_and(|moved| !moved));
-        assert!(store.rename("a/b/d", "../escape").is_err());
+        assert!(store.rename("a/b/c", "a/b/d", false).unwrap());
+        assert!(
+            !store.rename("a/b/c", "a/b/e", false).unwrap(),
+            "source is gone"
+        );
+        // An existing destination is only replaced when asked.
+        assert!(matches!(
+            store.rename("x", "a/b/d", false),
+            Err(Error::EntryExists(name)) if name == "a/b/d"
+        ));
+        assert!(store.rename("x", "a/b/d", true).unwrap());
+        assert!(
+            store
+                .rename("../escape", "y", false)
+                .is_ok_and(|moved| !moved)
+        );
+        assert!(store.rename("a/b/d", "../escape", false).is_err());
 
         let store = NativeStore::open(&path, b"pw").unwrap();
         assert_eq!(store.list().unwrap(), ["a/b/d"]);
         assert_eq!(store.get("a/b/d").unwrap().unwrap(), b, "metadata is kept");
+    }
+
+    #[test]
+    fn concurrent_writers_keep_each_others_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        NativeStore::create_with_params(&path, b"pw", TEST_PARAMS).unwrap();
+        // Two processes open the same database, then both write.
+        let mut first = NativeStore::open(&path, b"pw").unwrap();
+        let mut second = NativeStore::open(&path, b"pw").unwrap();
+        first.put("first", &entry("JBSWY3DPEHPK3PXP")).unwrap();
+        second.put("second", &entry("GEZDGNBVGY3TQOJQ")).unwrap();
+        assert_eq!(
+            NativeStore::open(&path, b"pw").unwrap().list().unwrap(),
+            ["first", "second"]
+        );
+        // A stale handle's other changes also keep what it has not seen.
+        second.remove("second").unwrap();
+        first.put("third", &entry("JBSWY3DPEHPK3PXP")).unwrap();
+        second.rename("first", "renamed", false).unwrap();
+        assert_eq!(
+            NativeStore::open(&path, b"pw").unwrap().list().unwrap(),
+            ["renamed", "third"]
+        );
+        // After a change, the handle sees the others' entries.
+        assert_eq!(second.list().unwrap(), ["renamed", "third"]);
+    }
+
+    #[test]
+    fn insert_refuses_a_name_added_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        NativeStore::create_with_params(&path, b"pw", TEST_PARAMS).unwrap();
+        let mut first = NativeStore::open(&path, b"pw").unwrap();
+        let mut second = NativeStore::open(&path, b"pw").unwrap();
+        let theirs = entry("JBSWY3DPEHPK3PXP");
+        first.insert("x", &theirs).unwrap();
+        assert!(matches!(
+            second.insert("x", &entry("GEZDGNBVGY3TQOJQ")),
+            Err(Error::EntryExists(name)) if name == "x"
+        ));
+        let store = NativeStore::open(&path, b"pw").unwrap();
+        assert_eq!(store.get("x").unwrap().unwrap(), theirs, "not overwritten");
+    }
+
+    #[test]
+    fn password_changed_elsewhere_refuses_to_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        let mut first = NativeStore::create_with_params(&path, b"old", TEST_PARAMS).unwrap();
+        first.put("a", &entry("JBSWY3DPEHPK3PXP")).unwrap();
+        let mut second = NativeStore::open(&path, b"old").unwrap();
+        first.change_password(b"new").unwrap();
+        assert!(matches!(
+            second.put("b", &entry("JBSWY3DPEHPK3PXP")),
+            Err(Error::DatabaseChanged(_))
+        ));
+        let store = NativeStore::open(&path, b"new").unwrap();
+        assert_eq!(store.list().unwrap(), ["a"], "nothing was written");
+    }
+
+    #[test]
+    fn changes_wait_for_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        NativeStore::create_with_params(&path, b"pw", TEST_PARAMS).unwrap();
+        let held = lock(&path).unwrap();
+        let writer = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                let mut store = NativeStore::open(&path, b"pw").unwrap();
+                store.put("a", &entry("JBSWY3DPEHPK3PXP")).unwrap();
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!writer.is_finished(), "the write must wait for the lock");
+        drop(held);
+        writer.join().unwrap();
+        assert_eq!(
+            NativeStore::open(&path, b"pw").unwrap().list().unwrap(),
+            ["a"]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let lock_file = dir.path().join("otp.db.lock");
+            let mode = fs::metadata(lock_file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "lock file mode is {mode:o}");
+        }
     }
 
     #[test]

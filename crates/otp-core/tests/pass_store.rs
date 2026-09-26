@@ -155,12 +155,21 @@ fn pass_store_end_to_end() {
 
     // Renaming moves the file into new folders and keeps the contents.
     let before = store.get(name).unwrap().unwrap();
-    assert!(store.rename(name, "archive/google/alice").unwrap());
+    assert!(store.rename(name, "archive/google/alice", false).unwrap());
     assert!(!store.contains(name).unwrap());
     assert_eq!(store.get("archive/google/alice").unwrap().unwrap(), before);
-    assert!(!store.rename(name, "elsewhere").unwrap(), "source is gone");
-    // An existing destination is replaced.
-    assert!(store.rename("archive/google/alice", "notes").unwrap());
+    assert!(
+        !store.rename(name, "elsewhere", false).unwrap(),
+        "source is gone"
+    );
+    // An existing destination is only replaced when asked; insert never replaces.
+    assert!(
+        store
+            .rename("archive/google/alice", "notes", false)
+            .is_err()
+    );
+    assert!(store.insert("notes", &before).is_err());
+    assert!(store.rename("archive/google/alice", "notes", true).unwrap());
     assert_eq!(store.get("notes").unwrap().unwrap(), before);
 
     assert!(store.remove("notes").unwrap());

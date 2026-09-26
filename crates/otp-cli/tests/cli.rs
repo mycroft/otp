@@ -66,10 +66,15 @@ esac
     }
 
     fn otp(&self) -> Command {
+        Command::from_std(self.std_otp())
+    }
+
+    /// `otp` as a plain process, for tests that interleave several of them.
+    fn std_otp(&self) -> std::process::Command {
         let mut path = std::ffi::OsString::from(self.path("bin"));
         path.push(":");
         path.push(std::env::var_os("PATH").unwrap());
-        let mut cmd = Command::cargo_bin("otp").unwrap();
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("otp"));
         cmd.env_clear()
             .env("PATH", path)
             .env("HOME", self.dir.path())
@@ -996,4 +1001,66 @@ fn mv_in_pass_and_across_stores() {
         .stderr(predicate::str::contains(
             "already exists in the native store",
         ));
+}
+
+#[test]
+fn concurrent_inserts_keep_both_entries() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let env = Env::new();
+    env.insert_uri("existing", HOTP_URI);
+    // The first insert opens the database, then waits at its URI prompt...
+    let mut first = env
+        .std_otp()
+        .args(["insert", "first"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    // ...while a second one completes.
+    env.insert_uri("second", HOTP_URI);
+    writeln!(first.stdin.take().unwrap(), "{HOTP_URI}").unwrap();
+    let output = first.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    env.otp()
+        .arg("list")
+        .assert()
+        .success()
+        .stdout("existing\nfirst\nsecond\n");
+}
+
+#[test]
+fn concurrent_inserts_of_one_name_keep_the_first() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let env = Env::new();
+    env.insert_uri("existing", HOTP_URI);
+    let mut late = env
+        .std_otp()
+        .args(["insert", "same"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    env.insert_uri("same", HOTP_URI);
+    let other = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP";
+    writeln!(late.stdin.take().unwrap(), "{other}").unwrap();
+    let output = late.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("same already exists"));
+    // The entry enrolled first is intact.
+    env.otp()
+        .args(["--otpauth", "same"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("secret=GEZDGNBVGY3TQOJQ"));
 }

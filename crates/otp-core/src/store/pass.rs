@@ -127,7 +127,8 @@ impl PassStore {
             .map_err(|_| Error::Pass(format!("{pass_name} is not valid UTF-8")))
     }
 
-    fn insert(&self, name: &str, contents: &str) -> Result<()> {
+    /// Writes an entry's contents with `pass insert`, replacing any existing one.
+    fn write_entry(&self, name: &str, contents: &str) -> Result<()> {
         let pass_name = Self::pass_name(name);
         let mut child = self
             .command(&["insert", "--multiline", "--force", "--", &pass_name])
@@ -226,7 +227,17 @@ impl Store for PassStore {
             None
         };
         let contents = Zeroizing::new(format(entry, trailer.as_deref().map(|s| s.as_str()))?);
-        self.insert(name, &contents)
+        self.write_entry(name, &contents)
+    }
+
+    fn insert(&mut self, name: &str, entry: &Entry) -> Result<()> {
+        // Entries are separate files, so concurrent writers can only collide on the same
+        // name; pass itself has no lock to close that small window.
+        if self.contains(name)? {
+            return Err(Error::EntryExists(name.to_string()));
+        }
+        let contents = Zeroizing::new(format(entry, None)?);
+        self.write_entry(name, &contents)
     }
 
     fn remove(&mut self, name: &str) -> Result<bool> {
@@ -248,10 +259,13 @@ impl Store for PassStore {
         Ok(true)
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> Result<bool> {
+    fn rename(&mut self, from: &str, to: &str, replace: bool) -> Result<bool> {
         validate_name(to)?;
         if !self.contains(from)? {
             return Ok(false);
+        }
+        if !replace && self.contains(to)? {
+            return Err(Error::EntryExists(to.to_string()));
         }
         let (from, to) = (Self::pass_name(from), Self::pass_name(to));
         // pass re-encrypts for the destination's .gpg-id and commits when using git.

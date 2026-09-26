@@ -22,6 +22,15 @@ pub enum Error {
     #[error("database already exists at {0}")]
     DatabaseExists(String),
 
+    #[error(
+        "the master password of {0} was changed by another otp since it was opened; \
+         nothing was saved, run the command again"
+    )]
+    DatabaseChanged(String),
+
+    #[error("{0} already exists")]
+    EntryExists(String),
+
     #[error("key derivation failed: {0}")]
     Kdf(String),
 

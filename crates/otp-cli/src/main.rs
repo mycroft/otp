@@ -361,7 +361,14 @@ fn insert(stores: &mut Stores, config: &Config, args: InsertArgs) -> Result<()> 
     if args.account.is_some() {
         otp.account = args.account.clone();
     }
-    stores.get_or_create(target)?.put(name, &Entry::new(otp))?;
+    let store = stores.get_or_create(target)?;
+    let entry = Entry::new(otp);
+    // Without --force, fail if another process added the name while we were prompting.
+    if args.force {
+        store.put(name, &entry)?;
+    } else {
+        store.insert(name, &entry)?;
+    }
     eprintln!("Inserted {name} into the {target} store.");
     Ok(())
 }
@@ -515,7 +522,7 @@ fn move_entry(
     let backend = stores.locate(from, only)?;
     check_available(stores, backend, &to, force)?;
     let store = stores.get(backend)?.expect("located store exists");
-    store.rename(from, &to)?;
+    store.rename(from, &to, force)?;
     eprintln!("Moved {from} to {to} in the {backend} store.");
     Ok(())
 }

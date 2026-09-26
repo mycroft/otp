@@ -143,7 +143,9 @@ errors are shown in the TUI.
 payload is encrypted with XChaCha20-Poly1305. The key is derived from the master password
 with Argon2id (64 MiB, 3 passes), and the header (format, KDF parameters, salt) is
 authenticated. Entry names are encrypted too. Writes are atomic, and the file is mode
-0600.
+0600. Every change takes an exclusive lock on `otp.db.lock` and applies to the file as it
+is at that moment, so several otp processes (a TUI left open, an `insert` waiting at its
+prompt) never undo each other's changes.
 
 **pass**: entry `NAME` is stored as `NAME-otp`. The first line is the `otpauth://` URI,
 so pass-otp and other tools can still read it. The lines after it hold JSON metadata:

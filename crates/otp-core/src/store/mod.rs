@@ -41,10 +41,16 @@ pub trait Store {
     /// Inserts or replaces an entry, persisting it immediately.
     fn put(&mut self, name: &str, entry: &Entry) -> Result<()>;
 
+    /// Inserts a new entry, persisting it immediately. Fails with
+    /// [`crate::Error::EntryExists`] if the name is taken, including by a process that
+    /// added it since this store was opened.
+    fn insert(&mut self, name: &str, entry: &Entry) -> Result<()>;
+
     /// Removes an entry. Returns whether it existed.
     fn remove(&mut self, name: &str) -> Result<bool>;
 
-    /// Renames an entry, replacing any entry already named `to`. Returns whether `from`
-    /// existed.
-    fn rename(&mut self, from: &str, to: &str) -> Result<bool>;
+    /// Renames an entry. An entry already named `to` is replaced with `replace`,
+    /// otherwise the rename fails with [`crate::Error::EntryExists`]. Returns whether
+    /// `from` existed.
+    fn rename(&mut self, from: &str, to: &str, replace: bool) -> Result<bool>;
 }

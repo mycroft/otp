@@ -141,7 +141,8 @@ errors are shown in the TUI.
 
 **Native database**: `~/.local/share/otp/otp.db` by default. A JSON envelope whose
 payload is encrypted with XChaCha20-Poly1305. The key is derived from the master password
-with Argon2id (64 MiB, 3 passes), and the header (format, KDF parameters, salt) is
+with Argon2id (256 MiB, 3 passes, 4 lanes in parallel; databases created by earlier
+versions keep their 64 MiB, 1 lane settings), and the header (format, KDF parameters, salt) is
 authenticated. Entry names are encrypted too. Writes are atomic, and the file is mode
 0600. Every change takes an exclusive lock on `otp.db.lock` and applies to the file as it
 is at that moment, so several otp processes (a TUI left open, an `insert` waiting at its

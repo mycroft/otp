@@ -36,12 +36,14 @@ pub struct KdfParams {
 }
 
 impl Default for KdfParams {
+    /// 256 MiB, 3 passes, 4 lanes: 4 times the cost of RFC 9106's memory-constrained
+    /// choice for an attacker, and about 270 ms on a recent laptop, with the lanes run in
+    /// parallel. Settings are stored in each database, so older ones keep opening.
     fn default() -> Self {
-        // 64 MiB, 3 passes: a few hundred milliseconds on a typical machine.
         KdfParams {
-            m_cost: 64 * 1024,
+            m_cost: 256 * 1024,
             t_cost: 3,
-            p_cost: 1,
+            p_cost: 4,
         }
     }
 }

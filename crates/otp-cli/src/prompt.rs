@@ -1,5 +1,6 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use zeroize::Zeroizing;
@@ -39,10 +40,28 @@ pub enum PasswordSource<'a> {
     Prompt,
 }
 
+/// `OTP_PASSWORD`, moved out of the environment by [`take_env_password`].
+static ENV_PASSWORD: OnceLock<Option<Zeroizing<String>>> = OnceLock::new();
+
+/// Reads `OTP_PASSWORD` and removes it from the environment, so that no child process
+/// (pass, gpg, the capture tool, the viewer, a clipboard tool that keeps running in the
+/// background) inherits the master password.
+///
+/// # Safety
+///
+/// Must be called before any other thread is started, as it modifies the environment.
+pub unsafe fn take_env_password() {
+    let password = std::env::var_os("OTP_PASSWORD")
+        .map(|password| Zeroizing::new(password.to_string_lossy().into_owned()));
+    // SAFETY: the caller guarantees no other thread reads or writes the environment.
+    unsafe { std::env::remove_var("OTP_PASSWORD") };
+    let _ = ENV_PASSWORD.set(password);
+}
+
 impl<'a> PasswordSource<'a> {
     pub fn new(command: Option<&'a [String]>) -> Self {
-        if let Some(password) = std::env::var_os("OTP_PASSWORD") {
-            return PasswordSource::Env(Zeroizing::new(password.to_string_lossy().into_owned()));
+        if let Some(Some(password)) = ENV_PASSWORD.get() {
+            return PasswordSource::Env(password.clone());
         }
         match command {
             Some(command) if !command.is_empty() => PasswordSource::Command(command),

@@ -1139,3 +1139,64 @@ fn show_escapes_labels_saved_by_older_versions() {
     );
     assert!(stdout.contains("account:   \\u{1b}[2J"), "{stdout}");
 }
+
+#[test]
+fn master_password_is_not_passed_to_child_processes() {
+    // Every tool otp runs records its environment.
+    let env = Env::new().with_fake_pass();
+    let dumps = env.path("env");
+    fs::create_dir_all(&dumps).unwrap();
+    let dump = |tool: &str| format!("env > {}/{tool}", dumps.display());
+    let png = env.path("qr.png");
+    write_qr_png(&png, HOTP_URI);
+    env.write_config(&format!(
+        "password_command = [\"sh\", \"-c\", \"{password}; echo 'correct horse'\"]\n\
+         clipboard_command = [\"sh\", \"-c\", \"{clipboard}; cat > /dev/null\"]\n\
+         capture_command = [\"sh\", \"-c\", \"{capture}; cp {png} \\\"$0\\\"\"]\n\
+         qrcode_viewer_command = [\"sh\", \"-c\", \"{viewer}\"]\n",
+        password = dump("password"),
+        clipboard = dump("clipboard"),
+        capture = dump("capture"),
+        viewer = dump("viewer"),
+        png = png.display(),
+    ));
+    let pass_script = env.path("bin/pass");
+    let script = fs::read_to_string(&pass_script).unwrap();
+    fs::write(
+        &pass_script,
+        script.replacen("\n", &format!("\n{}\n", dump("pass")), 1),
+    )
+    .unwrap();
+
+    env.otp()
+        .args(["insert", "--qrcode", "x"])
+        .assert()
+        .success();
+    env.otp().args(["-c", "x"]).assert().success();
+    env.otp().args(["--qrcode", "x"]).assert().success();
+    env.otp()
+        .args(["insert", "--pass", "p"])
+        .write_stdin(format!("{HOTP_URI}\n"))
+        .assert()
+        .success();
+    // Without OTP_PASSWORD, the password command runs; it must not see it either.
+    env.otp()
+        .env_remove("OTP_PASSWORD")
+        .arg("x")
+        .assert()
+        .success();
+
+    for tool in ["clipboard", "capture", "viewer", "pass", "password"] {
+        let seen =
+            fs::read_to_string(dumps.join(tool)).unwrap_or_else(|_| panic!("{tool} did not run"));
+        assert!(!seen.contains("OTP_PASSWORD"), "{tool} got OTP_PASSWORD");
+        assert!(
+            !seen.contains("correct horse"),
+            "{tool} got the master password"
+        );
+        assert!(
+            seen.contains("OTP_DB="),
+            "{tool}: the rest of the environment is kept"
+        );
+    }
+}

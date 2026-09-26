@@ -231,6 +231,8 @@ impl From<AlgorithmArg> for Algorithm {
 }
 
 fn main() -> ExitCode {
+    // SAFETY: first thing in main, before any thread exists.
+    unsafe { prompt::take_env_password() };
     // Answers shell completion requests (`COMPLETE=fish otp`) and exits.
     CompleteEnv::with_factory(Cli::command).complete();
     match run(Cli::parse()) {

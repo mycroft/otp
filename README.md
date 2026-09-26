@@ -117,6 +117,7 @@ with `--pass` / `--native`:
   set `group_digits = true` under `[tui]` in the configuration to show `123 456`.
 - Ctrl-H hides or shows the code, and the secret in the inspect window (the countdown
   stays, and copying still gives the real values). It works in the inspect window too.
+  To start hidden, run `otp tui --hidden` or set `hidden = true` under `[tui]`.
 - Ctrl-?, Ctrl-/ or F1 shows the help with all shortcuts; Esc closes it.
 
 Most terminals send Ctrl-I as Tab and Ctrl-? as Backspace. otp turns on the kitty
@@ -167,6 +168,7 @@ password_store_dir = "~/.password-store"
 
 [tui]
 group_digits = false      # true: show codes as "123 456" instead of "123456"
+hidden = false            # true: start with codes hidden (like Ctrl-H, or --hidden)
 ```
 
 Environment variables:

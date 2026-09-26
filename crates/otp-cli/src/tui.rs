@@ -30,11 +30,13 @@ pub enum Output {
     Uri,
 }
 
-/// Runs the TUI and returns the entry picked for copying, if any.
+/// Runs the TUI and returns the entry picked for copying, if any. With `hidden`, codes
+/// and secrets start masked.
 pub fn run(
     stores: &mut Stores,
     only: Option<Backend>,
     config: &TuiConfig,
+    hidden: bool,
 ) -> Result<Option<(String, Backend, Output)>> {
     // Listing may ask for the master password, so it happens before the TUI starts.
     let rows = stores.list(only)?;
@@ -43,6 +45,7 @@ pub fn run(
     }
     let mut app = App::new(rows);
     app.group_digits = config.group_digits;
+    app.hide_code = hidden;
     let mut terminal = ratatui::init();
     // Where the terminal supports it (kitty keyboard protocol), Ctrl+I and Ctrl+? are
     // reported as themselves instead of as Tab and Backspace.

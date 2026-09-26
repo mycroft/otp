@@ -78,6 +78,9 @@ enum Command {
     /// Browse entries interactively; Enter copies the selected code
     #[cfg(feature = "tui")]
     Tui {
+        /// Start with codes and secrets hidden (Ctrl-H shows them)
+        #[arg(long)]
+        hidden: bool,
         #[command(flatten)]
         only: BackendArgs,
     },
@@ -254,8 +257,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         Some(Command::Passwd) => passwd(&mut stores),
         #[cfg(feature = "tui")]
-        Some(Command::Tui { only }) => {
-            match tui::run(&mut stores, only.only(default), &config.tui)? {
+        Some(Command::Tui { hidden, only }) => {
+            let hidden = hidden || config.tui.hidden;
+            match tui::run(&mut stores, only.only(default), &config.tui, hidden)? {
                 // Copying goes through `otp -c` so HOTP counters are persisted the same way.
                 Some((name, backend, output)) => {
                     code(&mut stores, &config, CodeArgs::copy(name, backend, output))

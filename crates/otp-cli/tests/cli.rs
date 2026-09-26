@@ -843,7 +843,7 @@ fn qrcode_needs_an_exact_entry() {
 fn tui_section_is_accepted_and_validated() {
     // Valid in every build, with or without the `tui` feature.
     let env = Env::new();
-    env.write_config("[tui]\ngroup_digits = true\n");
+    env.write_config("[tui]\ngroup_digits = true\nhidden = true\n");
     env.otp().arg("list").assert().success();
     env.write_config("[tui]\ngroup_digit = true\n");
     env.otp()
@@ -882,4 +882,17 @@ fn completes_folders_along_entry_paths() {
         "Web/amazon.fr/\n"
     );
     assert_eq!(complete(&env, &["insert", "g"]), "");
+}
+
+#[cfg(feature = "tui")]
+#[test]
+fn tui_accepts_hidden_flag() {
+    // Without entries the TUI stops before taking over the terminal, which shows that
+    // the flag parses.
+    let env = Env::new();
+    env.otp()
+        .args(["tui", "--hidden"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no entries"));
 }

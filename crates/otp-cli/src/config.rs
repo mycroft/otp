@@ -36,6 +36,8 @@ pub struct TuiConfig {
     /// Show codes as `123 456` instead of `123456`. Off by default so that selecting a
     /// code with the mouse copies it without a space.
     pub group_digits: bool,
+    /// Start with codes and secrets hidden, as if Ctrl-H had been pressed.
+    pub hidden: bool,
 }
 
 impl Default for Config {

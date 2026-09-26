@@ -42,3 +42,6 @@ clipboard_command = ["wl-copy"]
 # Show codes as "123 456" instead of "123456". Off so that selecting a code with
 # the mouse copies it without a space.
 group_digits = false
+# Start with codes and secrets hidden, as if Ctrl-H had been pressed. `otp tui
+# --hidden` does the same for one run.
+hidden = false

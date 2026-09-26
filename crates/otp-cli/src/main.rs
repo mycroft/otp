@@ -152,6 +152,7 @@ impl BackendArgs {
 #[derive(Args)]
 struct InsertArgs {
     /// Entry name, e.g. google.com/alice@gmail.com
+    #[arg(add = ArgValueCompleter::new(complete::entry_folders))]
     name: String,
     /// Store in pass(1) as NAME-otp instead of the native database
     #[arg(long, conflicts_with = "native")]

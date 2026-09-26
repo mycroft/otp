@@ -694,7 +694,7 @@ fn completes_entry_names_from_both_stores() {
     fs::create_dir_all(env.pass_dir().join("google.com")).unwrap();
     fs::write(env.pass_dir().join("google.com/alice-otp.gpg"), b"").unwrap();
 
-    let expected = "google.com/alice\tpass\ngoogle.com/bob\tnative\n";
+    let expected = "google.com/\ngoogle.com/alice\tpass\ngoogle.com/bob\tnative\n";
     assert_eq!(complete(&env, &["goo"]), expected);
     assert_eq!(complete(&env, &["show", "goo"]), expected);
     assert_eq!(complete(&env, &["rm", "-f", "goo"]), expected);
@@ -837,4 +837,35 @@ fn qrcode_needs_an_exact_entry() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn completes_folders_along_entry_paths() {
+    let env = Env::new();
+    fs::create_dir_all(env.pass_dir().join("Web/amazon.fr")).unwrap();
+    fs::write(env.pass_dir().join("Web/amazon.fr/pm@mkz.me-otp.gpg"), b"").unwrap();
+    env.insert_uri("Web/github", HOTP_URI);
+    env.insert_uri("Web/amazon.fr/other", HOTP_URI);
+    env.insert_uri("google.com", HOTP_URI);
+
+    // Every folder along the paths is offered, each right before its contents.
+    assert_eq!(
+        complete(&env, &["W"]),
+        "Web/\nWeb/amazon.fr/\nWeb/amazon.fr/other\tnative\n\
+         Web/amazon.fr/pm@mkz.me\tpass\nWeb/github\tnative\n"
+    );
+    assert_eq!(
+        complete(&env, &["show", "Web/amazon.fr/p"]),
+        "Web/amazon.fr/pm@mkz.me\tpass\n"
+    );
+    // A name without a folder adds none.
+    assert_eq!(complete(&env, &["goo"]), "google.com\tnative\n");
+
+    // `insert` creates new names, so only folders are offered.
+    assert_eq!(complete(&env, &["insert", "W"]), "Web/\nWeb/amazon.fr/\n");
+    assert_eq!(
+        complete(&env, &["insert", "--pass", "Web/a"]),
+        "Web/amazon.fr/\n"
+    );
+    assert_eq!(complete(&env, &["insert", "g"]), "");
 }

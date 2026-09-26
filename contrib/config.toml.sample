@@ -30,9 +30,19 @@ capture_command = ["grimshot", "save", "area", "{file}"]
 #qrcode_viewer_command = ["chafa", "{file}"]
 #qrcode_viewer_command = ["imv", "{file}"]
 
-# Command receiving the code on stdin for `otp --clip`.
-clipboard_command = ["wl-copy"]
+# Command receiving the code on stdin for `otp --clip`. --sensitive asks clipboard
+# managers such as cliphist not to keep it in their history.
+clipboard_command = ["wl-copy", "--sensitive"]
 #clipboard_command = ["xclip", "-selection", "clipboard"]
+
+# Seconds after which a copied code, secret or URI is cleared from the clipboard,
+# if it is still there (like pass). 0 keeps it.
+clipboard_timeout = 45
+# Commands used to check the clipboard and to clear it.
+clipboard_paste_command = ["wl-paste", "--no-newline"]
+clipboard_clear_command = ["wl-copy", "--clear"]
+#clipboard_paste_command = ["xclip", "-selection", "clipboard", "-o"]
+#clipboard_clear_command = ["sh", "-c", "printf '' | xclip -selection clipboard"]
 
 # pass(1) store directory. Default: $PASSWORD_STORE_DIR or ~/.password-store.
 #password_store_dir = "~/.password-store"

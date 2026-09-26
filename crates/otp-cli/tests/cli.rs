@@ -352,7 +352,7 @@ fn clipboard_command_receives_code() {
     let env = Env::new();
     let clip = env.path("clipboard");
     env.write_config(&format!(
-        "clipboard_command = [\"sh\", \"-c\", \"cat > '{}'\"]\n",
+        "clipboard_command = [\"sh\", \"-c\", \"cat > '{}'\"]\nclipboard_timeout = 0\n",
         clip.display()
     ));
     env.insert_uri("x", HOTP_URI);
@@ -553,7 +553,7 @@ fn clip_copies_exported_secret() {
     let env = Env::new();
     let clip = env.path("clipboard");
     env.write_config(&format!(
-        "clipboard_command = [\"sh\", \"-c\", \"cat > '{}'\"]\n",
+        "clipboard_command = [\"sh\", \"-c\", \"cat > '{}'\"]\nclipboard_timeout = 0\n",
         clip.display()
     ));
     env.insert_uri("x", HOTP_URI);
@@ -1152,6 +1152,7 @@ fn master_password_is_not_passed_to_child_processes() {
     env.write_config(&format!(
         "password_command = [\"sh\", \"-c\", \"{password}; echo 'correct horse'\"]\n\
          clipboard_command = [\"sh\", \"-c\", \"{clipboard}; cat > /dev/null\"]\n\
+         clipboard_timeout = 0\n\
          capture_command = [\"sh\", \"-c\", \"{capture}; cp {png} \\\"$0\\\"\"]\n\
          qrcode_viewer_command = [\"sh\", \"-c\", \"{viewer}\"]\n",
         password = dump("password"),
@@ -1199,4 +1200,94 @@ fn master_password_is_not_passed_to_child_processes() {
             "{tool}: the rest of the environment is kept"
         );
     }
+}
+
+/// A clipboard backed by a file: copy writes it, paste prints it, clear empties it.
+fn file_clipboard(env: &Env, timeout: u64) -> std::path::PathBuf {
+    let clip = env.path("clipboard");
+    env.write_config(&format!(
+        "clipboard_command = [\"sh\", \"-c\", \"cat > '{clip}'\"]\n\
+         clipboard_paste_command = [\"cat\", \"{clip}\"]\n\
+         clipboard_clear_command = [\"sh\", \"-c\", \": > '{clip}'\"]\n\
+         clipboard_timeout = {timeout}\n",
+        clip = clip.display(),
+    ));
+    clip
+}
+
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn clipboard_is_cleared_after_the_timeout() {
+    let env = Env::new();
+    let clip = file_clipboard(&env, 1);
+    env.insert_uri("x", HOTP_URI);
+    env.otp()
+        .args(["-c", "--secret", "x"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("it will be cleared in 1 seconds"));
+    assert_eq!(fs::read_to_string(&clip).unwrap(), SECRET);
+    wait_until("the clipboard to be cleared", || {
+        fs::read_to_string(&clip).unwrap().is_empty()
+    });
+}
+
+#[test]
+fn clipboard_clearing_spares_a_newer_copy() {
+    let env = Env::new();
+    let clip = file_clipboard(&env, 1);
+    env.insert_uri("x", HOTP_URI);
+    env.otp().args(["-c", "x"]).assert().success();
+    // Something else is copied before the timeout.
+    fs::write(&clip, "copied later").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert_eq!(fs::read_to_string(&clip).unwrap(), "copied later");
+}
+
+#[test]
+fn clipboard_timeout_zero_keeps_the_value() {
+    let env = Env::new();
+    let clip = file_clipboard(&env, 0);
+    env.insert_uri("x", HOTP_URI);
+    env.otp()
+        .args(["-c", "x"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("will be cleared").not());
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert_eq!(fs::read_to_string(&clip).unwrap(), "755224");
+}
+
+#[test]
+fn default_clipboard_command_is_sensitive() {
+    // The default copy command asks clipboard managers not to keep the copy.
+    let env = Env::new();
+    env.write_config("clipboard_timeout = 0\n");
+    let bin = env.path("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let args = env.path("wl-copy-args");
+    let script = bin.join("wl-copy");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncat > /dev/null\n",
+            args.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    env.insert_uri("x", HOTP_URI);
+    env.otp().args(["-c", "x"]).assert().success();
+    assert_eq!(fs::read_to_string(&args).unwrap(), "--sensitive\n");
 }

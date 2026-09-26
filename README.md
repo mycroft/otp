@@ -64,7 +64,7 @@ otp google.com                              # list entries starting with google.
 
 # Print a code (TOTP or HOTP)
 otp google.com/codingmyc@gmail.com
-otp -c google.com/codingmyc@gmail.com       # copy to the clipboard instead
+otp -c google.com/codingmyc@gmail.com       # copy instead; cleared after 45 s
 
 # Export instead of generating a code (combines with -c; HOTP counters are untouched)
 otp --secret google.com/codingmyc@gmail.com   # base32 secret
@@ -173,7 +173,8 @@ database = "~/.local/share/otp/otp.db"
 # Get the master password from a command instead of prompting:
 password_command = ["pass", "show", "otp/master"]
 capture_command = ["grimshot", "save", "area", "{file}"]   # {file}: PNG to write
-clipboard_command = ["wl-copy"]
+clipboard_command = ["wl-copy", "--sensitive"]
+clipboard_timeout = 45    # seconds before a copied value is cleared; 0 keeps it
 qrcode_viewer_command = ["chafa", "{file}"]   # for otp --qrcode; unset: drawn by otp
 password_store_dir = "~/.password-store"
 

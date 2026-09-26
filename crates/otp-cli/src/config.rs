@@ -22,6 +22,13 @@ pub struct Config {
     pub qrcode_viewer_command: Option<Vec<String>>,
     /// Command receiving the code on stdin for `--clip`.
     pub clipboard_command: Vec<String>,
+    /// Seconds after which a copied value is cleared from the clipboard, if it is still
+    /// there. 0 keeps it.
+    pub clipboard_timeout: u64,
+    /// Command printing the clipboard, to check it still holds what otp copied.
+    pub clipboard_paste_command: Vec<String>,
+    /// Command clearing the clipboard.
+    pub clipboard_clear_command: Vec<String>,
     /// pass store directory. Defaults to `$PASSWORD_STORE_DIR` or `~/.password-store`.
     pub password_store_dir: Option<PathBuf>,
     /// `[tui]` section. Accepted even without the `tui` feature, so one config file
@@ -51,7 +58,11 @@ impl Default for Config {
                 .map(|s| s.to_string())
                 .collect(),
             qrcode_viewer_command: None,
-            clipboard_command: vec!["wl-copy".into()],
+            // --sensitive asks clipboard managers (e.g. cliphist) not to keep a history.
+            clipboard_command: vec!["wl-copy".into(), "--sensitive".into()],
+            clipboard_timeout: 45,
+            clipboard_paste_command: vec!["wl-paste".into(), "--no-newline".into()],
+            clipboard_clear_command: vec!["wl-copy".into(), "--clear".into()],
             password_store_dir: None,
             tui: TuiConfig::default(),
         }

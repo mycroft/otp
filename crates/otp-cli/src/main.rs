@@ -5,7 +5,7 @@ mod stores;
 #[cfg(feature = "tui")]
 mod tui;
 
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::SystemTime;
@@ -90,6 +90,9 @@ enum Command {
     },
     /// Change the master password of the native database
     Passwd,
+    /// Clears the clipboard after SECONDS if it still holds the value hashed on stdin
+    #[command(name = "__clear-clipboard", hide = true)]
+    ClearClipboard { seconds: u64 },
     /// Browse entries interactively; Enter copies the selected code
     #[cfg(feature = "tui")]
     Tui {
@@ -279,6 +282,7 @@ fn run(cli: Cli) -> Result<()> {
             only,
         }) => move_entry(&mut stores, &from, &to, force, only.only(default)),
         Some(Command::Passwd) => passwd(&mut stores),
+        Some(Command::ClearClipboard { seconds }) => clear_clipboard_later(&config, seconds),
         #[cfg(feature = "tui")]
         Some(Command::Tui { hidden, only }) => {
             let hidden = hidden || config.tui.hidden;
@@ -337,8 +341,14 @@ fn code(stores: &mut Stores, config: &Config, args: CodeArgs) -> Result<()> {
         (Zeroizing::new(code.value), "code")
     };
     if args.clip {
-        copy_to_clipboard(&config.clipboard_command, &output)?;
-        eprintln!("Copied the {what} for {name} to the clipboard.");
+        copy_to_clipboard(config, &output)?;
+        match config.clipboard_timeout {
+            0 => eprintln!("Copied the {what} for {name} to the clipboard."),
+            seconds => eprintln!(
+                "Copied the {what} for {name} to the clipboard; it will be cleared in \
+                 {seconds} seconds."
+            ),
+        }
     } else {
         println!("{}", output.as_str());
     }
@@ -589,8 +599,11 @@ fn show_qrcode(config: &Config, uri: &str, file: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn copy_to_clipboard(command: &[String], text: &str) -> Result<()> {
-    let (program, args) = command
+/// Copies `text` with `clipboard_command`, then schedules clearing it after
+/// `clipboard_timeout` seconds.
+fn copy_to_clipboard(config: &Config, text: &str) -> Result<()> {
+    let (program, args) = config
+        .clipboard_command
         .split_first()
         .context("clipboard_command is empty")?;
     let mut child = std::process::Command::new(program)
@@ -607,7 +620,69 @@ fn copy_to_clipboard(command: &[String], text: &str) -> Result<()> {
     if !status.success() {
         bail!("clipboard command {program:?} failed ({status})");
     }
+    if config.clipboard_timeout > 0 {
+        schedule_clipboard_clear(config.clipboard_timeout, text)
+            .context("scheduling the clipboard clearing")?;
+    }
     Ok(())
+}
+
+/// Starts `otp __clear-clipboard SECONDS` in the background. It outlives this process,
+/// and receives only a hash of the copied value, on stdin.
+fn schedule_clipboard_clear(seconds: u64, text: &str) -> Result<()> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args(["__clear-clipboard", &seconds.to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Its own process group, so closing the terminal does not stop it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(digest(text.as_bytes()).as_bytes())?;
+    Ok(())
+}
+
+/// `otp __clear-clipboard SECONDS`: waits, then clears the clipboard if it still holds
+/// the value whose hash is read from stdin, so that a newer copy is left alone.
+fn clear_clipboard_later(config: &Config, seconds: u64) -> Result<()> {
+    let mut expected = String::new();
+    std::io::stdin().read_to_string(&mut expected)?;
+    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    if let Some((program, args)) = config.clipboard_paste_command.split_first() {
+        let output = std::process::Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()?;
+        let current = Zeroizing::new(output.stdout);
+        if !output.status.success() || digest(&current) != expected.trim() {
+            return Ok(());
+        }
+    }
+    let (program, args) = config
+        .clipboard_clear_command
+        .split_first()
+        .context("clipboard_clear_command is empty")?;
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .status()?;
+    Ok(())
+}
+
+/// Hex SHA-256 of `data`.
+fn digest(data: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(data)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

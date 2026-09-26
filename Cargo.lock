@@ -1076,6 +1076,7 @@ dependencies = [
  "ratatui",
  "rpassword",
  "serde",
+ "sha2",
  "tempfile",
  "time",
  "toml",

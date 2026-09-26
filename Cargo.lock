@@ -1091,7 +1091,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "otp-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "otp-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",

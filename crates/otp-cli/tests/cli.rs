@@ -51,6 +51,10 @@ case "$1" in
     insert) mkdir -p "$(dirname "$file")" && cat > "$file" ;;
     show) cat "$file" ;;
     rm) rm "$file" ;;
+    mv)
+        # mv --force -- FROM TO
+        from="$PASSWORD_STORE_DIR/$4.gpg"
+        mkdir -p "$(dirname "$file")" && mv "$from" "$file" ;;
     *) exit 1 ;;
 esac
 "#,
@@ -895,4 +899,102 @@ fn tui_accepts_hidden_flag() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no entries"));
+}
+
+#[test]
+fn mv_renames_within_the_store() {
+    let env = Env::new();
+    env.insert_uri("a/b/c", HOTP_URI);
+    let uri = |name: &str| {
+        let output = env.otp().args(["--otpauth", name]).assert().success();
+        String::from_utf8(output.get_output().stdout.clone()).unwrap()
+    };
+    let original = uri("a/b/c");
+
+    env.otp()
+        .args(["mv", "a/b/c", "a/b/d"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Moved a/b/c to a/b/d in the native store",
+        ));
+    assert_eq!(uri("a/b/d"), original);
+    env.otp()
+        .arg("a/b/c")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not in the store"));
+
+    // A trailing slash moves the entry into that folder, keeping its name.
+    env.otp()
+        .args(["mv", "a/b/d", "archive/"])
+        .assert()
+        .success();
+    env.otp()
+        .arg("list")
+        .assert()
+        .success()
+        .stdout("archive/d\n");
+
+    // The destination must be free unless --force is given.
+    env.insert_uri("other", HOTP_URI);
+    env.otp()
+        .args(["mv", "other", "archive/d"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists; use --force"));
+    env.otp()
+        .args(["mv", "-f", "other", "archive/d"])
+        .assert()
+        .success();
+    env.otp()
+        .arg("list")
+        .assert()
+        .success()
+        .stdout("archive/d\n");
+
+    for (args, error) in [
+        (["mv", "missing", "x"], "missing is not in the store"),
+        (["mv", "archive/d", "archive/d"], "already named"),
+        (["mv", "archive/", "x"], "is a folder"),
+        (["mv", "archive/d", "../escape"], "invalid entry name"),
+    ] {
+        env.otp()
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(error));
+    }
+}
+
+#[test]
+fn mv_in_pass_and_across_stores() {
+    let env = Env::new().with_fake_pass();
+    fs::write(env.pass_dir().join("web-otp.gpg"), format!("{HOTP_URI}\n")).unwrap();
+    env.insert_uri("native-entry", HOTP_URI);
+
+    env.otp()
+        .args(["mv", "web", "Web/amazon.fr/pm@mkz.me"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("in the pass store"));
+    assert!(
+        env.pass_dir()
+            .join("Web/amazon.fr/pm@mkz.me-otp.gpg")
+            .is_file()
+    );
+    env.otp()
+        .arg("Web/amazon.fr/pm@mkz.me")
+        .assert()
+        .success()
+        .stdout("755224\n");
+
+    // Names stay unique across stores, even with --force.
+    env.otp()
+        .args(["mv", "-f", "Web/amazon.fr/pm@mkz.me", "native-entry"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "already exists in the native store",
+        ));
 }

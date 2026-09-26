@@ -241,6 +241,27 @@ impl Store for PassStore {
         }
         Ok(true)
     }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<bool> {
+        validate_name(to)?;
+        if !self.contains(from)? {
+            return Ok(false);
+        }
+        let (from, to) = (Self::pass_name(from), Self::pass_name(to));
+        // pass re-encrypts for the destination's .gpg-id and commits when using git.
+        let status = self
+            .command(&["mv", "--force", "--", &from, &to])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| self.spawn_error(e))?;
+        if !status.success() {
+            return Err(Error::Pass(format!(
+                "`pass mv {from} {to}` failed ({status})"
+            )));
+        }
+        Ok(true)
+    }
 }
 
 fn split(contents: &str) -> (&str, &str) {

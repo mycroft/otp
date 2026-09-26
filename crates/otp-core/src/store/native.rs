@@ -275,6 +275,26 @@ impl Store for NativeStore {
         }
         Ok(true)
     }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<bool> {
+        validate_name(to)?;
+        let entries = &mut self.contents.entries;
+        let Some(entry) = entries.remove(from) else {
+            return Ok(false);
+        };
+        let replaced = entries.insert(to.to_string(), entry);
+        // A single save, so the entry is never missing or duplicated on disk.
+        if let Err(e) = self.save() {
+            let entries = &mut self.contents.entries;
+            let entry = entries.remove(to).expect("just inserted");
+            entries.insert(from.to_string(), entry);
+            if let Some(replaced) = replaced {
+                entries.insert(to.to_string(), replaced);
+            }
+            return Err(e);
+        }
+        Ok(true)
+    }
 }
 
 fn cipher(key: &[u8; KEY_LEN]) -> XChaCha20Poly1305 {
@@ -429,6 +449,28 @@ mod tests {
             NativeStore::create_with_params(&path, b"pw", TEST_PARAMS),
             Err(Error::DatabaseExists(_))
         ));
+    }
+
+    #[test]
+    fn rename_moves_and_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        let mut store = NativeStore::create_with_params(&path, b"pw", TEST_PARAMS).unwrap();
+        let a = entry("JBSWY3DPEHPK3PXP");
+        let b = entry("GEZDGNBVGY3TQOJQ");
+        store.put("a/b/c", &a).unwrap();
+        store.put("x", &b).unwrap();
+
+        assert!(store.rename("a/b/c", "a/b/d").unwrap());
+        assert!(!store.rename("a/b/c", "a/b/e").unwrap(), "source is gone");
+        // An existing destination is replaced.
+        assert!(store.rename("x", "a/b/d").unwrap());
+        assert!(store.rename("../escape", "y").is_ok_and(|moved| !moved));
+        assert!(store.rename("a/b/d", "../escape").is_err());
+
+        let store = NativeStore::open(&path, b"pw").unwrap();
+        assert_eq!(store.list().unwrap(), ["a/b/d"]);
+        assert_eq!(store.get("a/b/d").unwrap().unwrap(), b, "metadata is kept");
     }
 
     #[test]

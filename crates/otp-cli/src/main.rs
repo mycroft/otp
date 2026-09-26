@@ -73,6 +73,21 @@ enum Command {
         #[command(flatten)]
         only: BackendArgs,
     },
+    /// Rename or move an entry, within its store
+    #[command(alias = "rename")]
+    Mv {
+        /// Entry to move
+        #[arg(add = ArgValueCompleter::new(complete::entry_names))]
+        from: String,
+        /// New name; ending with `/` moves the entry into that folder, keeping its name
+        #[arg(add = ArgValueCompleter::new(complete::entry_folders))]
+        to: String,
+        /// Replace an existing entry named TO
+        #[arg(short, long)]
+        force: bool,
+        #[command(flatten)]
+        only: BackendArgs,
+    },
     /// Change the master password of the native database
     Passwd,
     /// Browse entries interactively; Enter copies the selected code
@@ -255,6 +270,12 @@ fn run(cli: Cli) -> Result<()> {
         Some(Command::Rm { name, force, only }) => {
             remove(&mut stores, &name, force, only.only(default))
         }
+        Some(Command::Mv {
+            from,
+            to,
+            force,
+            only,
+        }) => move_entry(&mut stores, &from, &to, force, only.only(default)),
         Some(Command::Passwd) => passwd(&mut stores),
         #[cfg(feature = "tui")]
         Some(Command::Tui { hidden, only }) => {
@@ -330,17 +351,8 @@ fn insert(stores: &mut Stores, config: &Config, args: InsertArgs) -> Result<()> 
         (_, true) => Backend::Native,
         _ => config.backend().unwrap_or(Backend::Native),
     };
-    let other = match target {
-        Backend::Pass => Backend::Native,
-        Backend::Native => Backend::Pass,
-    };
     // Check for conflicts before asking for the secret.
-    if stores.contains(other, name)? {
-        bail!("{name} already exists in the {other} store; remove it first");
-    }
-    if stores.contains(target, name)? && !args.force {
-        bail!("{name} already exists; use --force to overwrite it");
-    }
+    check_available(stores, target, name, args.force)?;
 
     let mut otp = read_otp(config, &args)?;
     if args.issuer.is_some() {
@@ -351,6 +363,22 @@ fn insert(stores: &mut Stores, config: &Config, args: InsertArgs) -> Result<()> 
     }
     stores.get_or_create(target)?.put(name, &Entry::new(otp))?;
     eprintln!("Inserted {name} into the {target} store.");
+    Ok(())
+}
+
+/// Checks that `name` can be written to `backend`: names are unique across stores, and
+/// an existing entry in `backend` is only replaced with `force`.
+fn check_available(stores: &mut Stores, backend: Backend, name: &str, force: bool) -> Result<()> {
+    let other = match backend {
+        Backend::Pass => Backend::Native,
+        Backend::Native => Backend::Pass,
+    };
+    if stores.contains(other, name)? {
+        bail!("{name} already exists in the {other} store; remove it first");
+    }
+    if stores.contains(backend, name)? && !force {
+        bail!("{name} already exists; use --force to overwrite it");
+    }
     Ok(())
 }
 
@@ -454,6 +482,35 @@ fn remove(stores: &mut Stores, name: &str, force: bool, only: Option<Backend>) -
     let store = stores.get(backend)?.expect("located store exists");
     store.remove(name)?;
     eprintln!("Removed {name} from the {backend} store.");
+    Ok(())
+}
+
+/// `otp mv FROM TO`: renames an entry within its store.
+fn move_entry(
+    stores: &mut Stores,
+    from: &str,
+    to: &str,
+    force: bool,
+    only: Option<Backend>,
+) -> Result<()> {
+    if from.ends_with('/') {
+        bail!("{from} is a folder; move its entries one at a time");
+    }
+    validate_name(from)?;
+    // Like mv(1): a trailing slash moves the entry into that folder.
+    let to = match to.strip_suffix('/') {
+        Some(folder) => format!("{folder}/{}", from.rsplit('/').next().unwrap_or(from)),
+        None => to.to_string(),
+    };
+    validate_name(&to)?;
+    if from == to {
+        bail!("{from} is already named {to}");
+    }
+    let backend = stores.locate(from, only)?;
+    check_available(stores, backend, &to, force)?;
+    let store = stores.get(backend)?.expect("located store exists");
+    store.rename(from, &to)?;
+    eprintln!("Moved {from} to {to} in the {backend} store.");
     Ok(())
 }
 

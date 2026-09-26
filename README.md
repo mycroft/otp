@@ -89,6 +89,7 @@ otp insert --pass google.com/codingmyc@gmail.com --qrcode
 otp list [PREFIX] [--long]  # entries from both stores (or --pass / --native)
 otp show NAME [--uri]       # parameters, or the otpauth:// URI (includes the secret)
 otp rm NAME [--force]
+otp mv FROM TO [--force]    # rename within its store; TO ending in / keeps the name
 otp passwd                  # change the native database's master password
 ```
 

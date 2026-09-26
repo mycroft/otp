@@ -43,4 +43,8 @@ pub trait Store {
 
     /// Removes an entry. Returns whether it existed.
     fn remove(&mut self, name: &str) -> Result<bool>;
+
+    /// Renames an entry, replacing any entry already named `to`. Returns whether `from`
+    /// existed.
+    fn rename(&mut self, from: &str, to: &str) -> Result<bool>;
 }

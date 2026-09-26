@@ -324,6 +324,17 @@ impl Store for NativeStore {
         })
     }
 
+    fn update(&mut self, name: &str, change: &mut dyn FnMut(&mut Entry)) -> Result<Entry> {
+        self.modify(|contents| {
+            let entry = contents
+                .entries
+                .get_mut(name)
+                .ok_or_else(|| Error::EntryGone(name.to_string()))?;
+            change(entry);
+            Ok(entry.clone())
+        })
+    }
+
     fn remove(&mut self, name: &str) -> Result<bool> {
         self.modify(|contents| Ok(contents.entries.remove(name).is_some()))
     }
@@ -580,6 +591,60 @@ mod tests {
         );
         // After a change, the handle sees the others' entries.
         assert_eq!(second.list().unwrap(), ["renamed", "third"]);
+    }
+
+    fn hotp(counter: u64) -> Entry {
+        Entry::new(
+            OtpSecret::new(b"12345678901234567890".to_vec(), Kind::Hotp { counter }).unwrap(),
+        )
+    }
+
+    /// Generates the next HOTP code of `name` through `update`, as `otp NAME` does.
+    fn next_code(store: &mut NativeStore, name: &str) -> Result<String> {
+        let mut code = None;
+        store.update(name, &mut |entry| {
+            code = Some(entry.otp.generate(std::time::SystemTime::now()).value);
+        })?;
+        Ok(code.expect("update ran the change"))
+    }
+
+    #[test]
+    fn update_advances_the_stored_counter_not_a_stale_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        let mut other = NativeStore::create_with_params(&path, b"pw", TEST_PARAMS).unwrap();
+        other.put("bank", &hotp(0)).unwrap();
+        // A TUI opens the database, then another terminal uses two codes.
+        let mut tui = NativeStore::open(&path, b"pw").unwrap();
+        assert_eq!(next_code(&mut other, "bank").unwrap(), "755224");
+        assert_eq!(next_code(&mut other, "bank").unwrap(), "287082");
+        // The TUI's copy still says counter 0, but it gets the next unused code.
+        assert_eq!(
+            tui.get("bank").unwrap().unwrap().otp.kind,
+            Kind::Hotp { counter: 0 }
+        );
+        assert_eq!(next_code(&mut tui, "bank").unwrap(), "359152");
+        assert_eq!(next_code(&mut other, "bank").unwrap(), "969429");
+        let store = NativeStore::open(&path, b"pw").unwrap();
+        assert_eq!(
+            store.get("bank").unwrap().unwrap().otp.kind,
+            Kind::Hotp { counter: 4 }
+        );
+    }
+
+    #[test]
+    fn update_does_not_bring_back_a_removed_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        let mut other = NativeStore::create_with_params(&path, b"pw", TEST_PARAMS).unwrap();
+        other.put("bank", &hotp(0)).unwrap();
+        let mut tui = NativeStore::open(&path, b"pw").unwrap();
+        other.remove("bank").unwrap();
+        assert!(
+            matches!(next_code(&mut tui, "bank"), Err(Error::EntryGone(name)) if name == "bank")
+        );
+        let store = NativeStore::open(&path, b"pw").unwrap();
+        assert!(store.list().unwrap().is_empty(), "the secret stays deleted");
     }
 
     #[test]

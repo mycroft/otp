@@ -31,6 +31,9 @@ pub enum Error {
     #[error("{0} already exists")]
     EntryExists(String),
 
+    #[error("{0} is not in the store anymore (removed or renamed meanwhile?)")]
+    EntryGone(String),
+
     #[error("key derivation failed: {0}")]
     Kdf(String),
 

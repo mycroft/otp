@@ -46,6 +46,13 @@ pub trait Store {
     /// added it since this store was opened.
     fn insert(&mut self, name: &str, entry: &Entry) -> Result<()>;
 
+    /// Changes an entry as it is currently stored, not as it was read earlier, and
+    /// returns the result: for the native store, under the lock, on the freshly read
+    /// file. Fails with [`crate::Error::EntryGone`] if the entry was removed meanwhile.
+    ///
+    /// Used to advance HOTP counters, so a code is never generated twice.
+    fn update(&mut self, name: &str, change: &mut dyn FnMut(&mut Entry)) -> Result<Entry>;
+
     /// Removes an entry. Returns whether it existed.
     fn remove(&mut self, name: &str) -> Result<bool>;
 

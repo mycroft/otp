@@ -128,17 +128,20 @@ fn pass_store_end_to_end() {
     let meta: serde_json::Value = serde_json::from_str(rest).unwrap();
     assert!(meta["created_at"].is_string());
 
-    // Consuming an HOTP code persists the new counter.
-    let mut got = store.get(name).unwrap().unwrap();
-    assert_eq!(
-        got.otp.generate(std::time::SystemTime::now()).value,
-        "755224"
-    );
-    store.put(name, &got).unwrap();
+    // Consuming an HOTP code through update persists the new counter.
+    let mut code = None;
+    let updated = store
+        .update(name, &mut |entry| {
+            code = Some(entry.otp.generate(std::time::SystemTime::now()).value)
+        })
+        .unwrap();
+    assert_eq!(code.as_deref(), Some("755224"));
+    assert_eq!(updated.otp.kind, Kind::Hotp { counter: 1 });
     assert_eq!(
         store.get(name).unwrap().unwrap().otp.kind,
         Kind::Hotp { counter: 1 }
     );
+    assert!(store.update("missing", &mut |_| {}).is_err());
 
     // Foreign entries keep their trailing notes when rewritten.
     let foreign = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP\nrecovery: 1111 2222\n";

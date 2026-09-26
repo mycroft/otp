@@ -240,6 +240,17 @@ impl Store for PassStore {
         self.write_entry(name, &contents)
     }
 
+    fn update(&mut self, name: &str, change: &mut dyn FnMut(&mut Entry)) -> Result<Entry> {
+        // Read it again now: an earlier copy may be outdated. pass has no lock, so two
+        // processes updating the same entry at the same instant can still race.
+        let mut entry = self
+            .get(name)?
+            .ok_or_else(|| Error::EntryGone(name.to_string()))?;
+        change(&mut entry);
+        self.put(name, &entry)?;
+        Ok(entry)
+    }
+
     fn remove(&mut self, name: &str) -> Result<bool> {
         if !self.contains(name)? {
             return Ok(false);

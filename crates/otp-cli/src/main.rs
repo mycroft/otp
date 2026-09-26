@@ -321,7 +321,7 @@ fn code(stores: &mut Stores, config: &Config, args: CodeArgs) -> Result<()> {
     validate_name(&name)?;
     let backend = stores.locate(&name, args.only.only(config.backend()))?;
     let store = stores.get(backend)?.expect("located store exists");
-    let mut entry = store.get(&name)?.context("entry disappeared")?;
+    let entry = store.get(&name)?.context("entry disappeared")?;
     // Exporting the secret, URI or QR code leaves an HOTP counter untouched.
     if let Some(file) = &args.qrcode {
         let uri = Zeroizing::new(entry.otp.to_uri());
@@ -331,14 +331,21 @@ fn code(stores: &mut Stores, config: &Config, args: CodeArgs) -> Result<()> {
         (Zeroizing::new(entry.otp.secret_base32()), "secret")
     } else if args.otpauth {
         (Zeroizing::new(entry.otp.to_uri()), "otpauth URI")
-    } else {
-        let code = entry.otp.generate(SystemTime::now());
-        if let Kind::Hotp { .. } = entry.otp.kind {
-            // The counter moved forward; persist it before showing the code.
+    } else if let Kind::Hotp { .. } = entry.otp.kind {
+        // Generate from the counter as stored now, not from the copy read earlier (a TUI
+        // may have read it long ago), and save the advanced counter in the same step.
+        let mut code = None;
+        store.update(&name, &mut |entry| {
+            code = Some(entry.otp.generate(SystemTime::now()));
             entry.touch();
-            store.put(&name, &entry)?;
-        }
-        (Zeroizing::new(code.value), "code")
+        })?;
+        (Zeroizing::new(code.expect("update ran").value), "code")
+    } else {
+        let mut otp = entry.otp.clone();
+        (
+            Zeroizing::new(otp.generate(SystemTime::now()).value),
+            "code",
+        )
     };
     if args.clip {
         copy_to_clipboard(config, &output)?;

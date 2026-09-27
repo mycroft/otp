@@ -42,7 +42,7 @@ pub struct Config {
     pub file: Option<PathBuf>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub struct TuiConfig {
@@ -51,6 +51,18 @@ pub struct TuiConfig {
     pub group_digits: bool,
     /// Start with codes and secrets hidden, as if Ctrl-H had been pressed.
     pub hidden: bool,
+    /// Switch to hidden mode after this many seconds without a key press. 0 never does.
+    pub hide_after: u64,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        TuiConfig {
+            group_digits: false,
+            hidden: false,
+            hide_after: 30,
+        }
+    }
 }
 
 impl Default for Config {

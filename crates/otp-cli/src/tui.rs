@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, stdout};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use otp_core::store::{Backend, PassStore};
@@ -51,6 +51,8 @@ pub fn run(
     let mut app = App::new(rows);
     app.group_digits = config.tui.group_digits;
     app.hide_code = hidden;
+    app.hide_after =
+        (config.tui.hide_after > 0).then(|| Duration::from_secs(config.tui.hide_after));
     // Like `otp insert`: --pass/--native, then the `backend` setting, then native.
     app.target = only.unwrap_or(Backend::Native);
     let mut terminal = ratatui::try_init().context("cannot start the TUI")?;
@@ -84,6 +86,7 @@ fn event_loop(
         terminal.draw(|frame| app.render(frame, SystemTime::now()))?;
         // Wake up regularly so TOTP codes and countdowns stay current.
         if !event::poll(Duration::from_millis(250))? {
+            app.check_idle(Instant::now());
             continue;
         }
         // Drain pending input before decrypting anything, so key repeat stays responsive.
@@ -249,6 +252,9 @@ pub struct App {
     hide_code: bool,
     /// Codes are shown as `123 456` (the `[tui] group_digits` setting).
     group_digits: bool,
+    /// Switch to hidden mode after this long without a key press (`[tui] hide_after`).
+    hide_after: Option<Duration>,
+    last_key: Instant,
     filter: String,
     /// Indices into `rows` matching the filter.
     visible: Vec<usize>,
@@ -270,6 +276,8 @@ impl App {
             qr_return: Mode::List,
             hide_code: false,
             group_digits: false,
+            hide_after: None,
+            last_key: Instant::now(),
             filter: String::new(),
             visible: Vec::new(),
             list: ListState::default(),
@@ -318,6 +326,7 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return Action::Quit;
         }
+        self.last_key = Instant::now();
         self.status = None;
         match self.mode {
             Mode::List => {}
@@ -560,6 +569,27 @@ impl App {
     fn close_new(&mut self) {
         self.new = None;
         self.mode = Mode::List;
+    }
+
+    /// Switches to hidden mode once `hide_after` has passed since the last key press, and
+    /// closes the QR code window, which shows the secret in scannable form.
+    pub fn check_idle(&mut self, now: Instant) {
+        let Some(hide_after) = self.hide_after else {
+            return;
+        };
+        if now.saturating_duration_since(self.last_key) < hide_after {
+            return;
+        }
+        if self.mode == Mode::QrCode {
+            self.mode = self.qr_return;
+        }
+        if !self.hide_code {
+            self.hide_code = true;
+            self.status = Some(format!(
+                "Hidden after {} s without a key press; Ctrl-H shows the codes",
+                hide_after.as_secs()
+            ));
+        }
     }
 
     /// `value`, or as many bullets when codes and secrets are hidden (Ctrl-H).
@@ -1580,6 +1610,56 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
         app.handle_key(ctrl('n'));
         assert_eq!(app.mode, Mode::New);
+    }
+
+    #[test]
+    fn idle_tui_switches_to_hidden_mode() {
+        let mut app = app(&["google.com/alice"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        app.hide_after = Some(Duration::from_secs(30));
+        let start = app.last_key;
+
+        app.check_idle(start + Duration::from_secs(29));
+        assert!(!app.hide_code, "not before the delay");
+        app.check_idle(start + Duration::from_secs(30));
+        assert!(app.hide_code);
+        let screen = render_at(&mut app, UNIX_EPOCH + Duration::from_secs(59), 90, 12);
+        assert!(screen.contains("Code (hidden)"), "{screen}");
+        assert!(
+            screen.contains("Hidden after 30 s without a key press"),
+            "{screen}"
+        );
+
+        // Ctrl-H shows the codes again; a key press restarts the delay.
+        app.handle_key(ctrl('h'));
+        assert!(!app.hide_code);
+        let pressed = app.last_key;
+        assert!(pressed >= start);
+        app.check_idle(pressed + Duration::from_secs(29));
+        assert!(!app.hide_code);
+        app.check_idle(pressed + Duration::from_secs(31));
+        assert!(app.hide_code);
+    }
+
+    #[test]
+    fn idle_tui_closes_the_qr_code_window() {
+        let mut app = app(&["a"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        app.hide_after = Some(Duration::from_secs(30));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.mode, Mode::QrCode);
+        app.check_idle(app.last_key + Duration::from_secs(30));
+        assert_eq!(app.mode, Mode::Inspect, "back to where it was opened from");
+        assert!(app.hide_code);
+    }
+
+    #[test]
+    fn idle_hiding_can_be_disabled() {
+        let mut app = app(&["a"]);
+        app.hide_after = None;
+        app.check_idle(app.last_key + Duration::from_secs(3600));
+        assert!(!app.hide_code);
     }
 
     #[test]

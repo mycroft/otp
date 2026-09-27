@@ -61,3 +61,6 @@ group_digits = false
 # Start with codes and secrets hidden, as if Ctrl-H had been pressed. `otp tui
 # --hidden` does the same for one run.
 hidden = false
+# Switch to hidden mode after this many seconds without a key press (the QR code
+# window is closed too). 0 never does.
+hide_after = 30

@@ -208,6 +208,10 @@ cargo clippy --workspace --all-targets --all-features
 GitHub Actions runs `cargo fmt --check`, `cargo clippy -D warnings` and the tests on
 pushes to `main` and on pull requests (`.github/workflows/ci.yml`).
 
+`.github/workflows/audit.yml` runs `cargo audit` daily, and whenever `Cargo.toml` or
+`Cargo.lock` change, to catch security advisories published after a dependency was
+locked.
+
 ### Releasing
 
 Set the new `version` in the root `Cargo.toml`, commit, then push a matching tag:

@@ -141,9 +141,11 @@ errors are shown in the TUI.
 
 **Native database**: `~/.local/share/otp/otp.db` by default. A JSON envelope whose
 payload is encrypted with XChaCha20-Poly1305. The key is derived from the master password
-with Argon2id (256 MiB, 3 passes, 4 lanes in parallel; databases created by earlier
-versions keep their 64 MiB, 1 lane settings), and the header (format, KDF parameters, salt) is
-authenticated. A new master password needs at least 12 characters and zxcvbn's top
+with Argon2id (256 MiB, 3 passes, 4 lanes in parallel). Databases created by earlier
+versions keep their 64 MiB, 1 lane settings, and otp warns about them: `otp passwd`
+upgrades them (typing the same password again is fine). Settings over 1 GiB, 10 passes
+or 16 lanes are refused before any work, so a tampered file cannot make otp hang or
+exhaust memory. The header (format, KDF parameters, salt) is authenticated. A new master password needs at least 12 characters and zxcvbn's top
 strength score, 4: more than 10^10 estimated guesses (4 random words or 12 random
 characters pass); `password_score_check = false` keeps only the length. Opening a
 database with a weaker typed password prints a warning suggesting `otp passwd`.

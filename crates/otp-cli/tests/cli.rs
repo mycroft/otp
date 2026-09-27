@@ -1473,3 +1473,57 @@ fn clipboard_clearing_uses_the_same_config_file() {
         fs::read_to_string(&clip).unwrap().is_empty()
     });
 }
+
+#[test]
+fn tampered_kdf_settings_fail_fast() {
+    let env = Env::new();
+    env.insert_uri("x", HOTP_URI);
+    let path = env.path("data/otp.db");
+    // This value used to make `otp` (and every shell completion) hang for days.
+    let database = fs::read_to_string(&path).unwrap();
+    assert!(database.contains("\"t_cost\": 3,"), "{database}");
+    fs::write(
+        &path,
+        database.replace("\"t_cost\": 3,", "\"t_cost\": 4294967295,"),
+    )
+    .unwrap();
+    let start = std::time::Instant::now();
+    env.otp()
+        .arg("x")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "exceed otp's limits: 4294967295 passes",
+        ));
+    assert_eq!(
+        complete(&env, &["x"]),
+        "",
+        "completion skips the database instead of hanging"
+    );
+    assert!(start.elapsed().as_secs() < 5);
+}
+
+#[test]
+fn older_kdf_settings_still_open() {
+    use otp_core::store::{KdfParams, NativeStore, Store};
+    use otp_core::{Entry, Kind, OtpSecret};
+
+    // The settings of databases created before 0.4.0.
+    let env = Env::new();
+    let old = KdfParams {
+        m_cost: 64 * 1024,
+        t_cost: 3,
+        p_cost: 1,
+    };
+    let mut store =
+        NativeStore::create_with_params(env.path("data/otp.db"), PASSWORD.as_bytes(), old).unwrap();
+    let otp = OtpSecret::from_base32(SECRET, Kind::Hotp { counter: 0 }).unwrap();
+    store.put("x", &Entry::new(otp)).unwrap();
+    // The warning is only shown on a terminal; scripts get a clean stderr.
+    env.otp()
+        .arg("x")
+        .assert()
+        .success()
+        .stdout("755224\n")
+        .stderr("");
+}

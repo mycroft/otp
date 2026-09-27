@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -37,6 +38,13 @@ impl<'a> Stores<'a> {
             let password = self.password.existing()?;
             let store = NativeStore::open(&self.db_path, password.as_bytes())
                 .with_context(|| format!("opening {}", self.db_path.display()))?;
+            // Databases created by older versions use cheaper key derivation settings.
+            if store.kdf_params().is_weaker_than_default() && std::io::stderr().is_terminal() {
+                eprintln!(
+                    "otp: warning: the database uses weaker key derivation settings than \
+                     the current defaults; upgrade them with `otp passwd`"
+                );
+            }
             // Databases created before the strength check may have a weak password.
             if self.password.is_prompt()
                 && prompt::check_strength(&password, self.check_score).is_err()

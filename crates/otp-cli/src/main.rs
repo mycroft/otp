@@ -577,8 +577,14 @@ fn passwd(stores: &mut Stores, config: &Config) -> Result<()> {
     let store = stores.native_for_passwd()?;
     let password =
         PasswordSource::Prompt.new_password("New master password", config.password_score_check)?;
+    let weaker = store.kdf_params().is_weaker_than_default();
+    // Also re-encrypts with the current default key derivation settings.
     store.change_password(password.as_bytes())?;
-    eprintln!("Master password changed.");
+    if weaker {
+        eprintln!("Master password changed, and key derivation settings upgraded.");
+    } else {
+        eprintln!("Master password changed.");
+    }
     Ok(())
 }
 

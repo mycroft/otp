@@ -35,6 +35,49 @@ pub struct KdfParams {
     pub p_cost: u32,
 }
 
+impl KdfParams {
+    /// Upper limits, checked before deriving a key: the settings come from the database
+    /// file, and without limits a tampered file could make otp allocate all memory or
+    /// run for days (Argon2 only checks lower bounds). Four times the default memory.
+    pub const MAX_M_COST: u32 = 1024 * 1024;
+    pub const MAX_T_COST: u32 = 10;
+    pub const MAX_P_COST: u32 = 16;
+
+    /// Checks the upper limits.
+    pub fn check_limits(&self) -> Result<()> {
+        let over = |what: String| Err(Error::KdfLimits(what));
+        if self.m_cost > Self::MAX_M_COST {
+            return over(format!(
+                "{} MiB of memory, the limit is {} MiB",
+                self.m_cost / 1024,
+                Self::MAX_M_COST / 1024
+            ));
+        }
+        if self.t_cost > Self::MAX_T_COST {
+            return over(format!(
+                "{} passes, the limit is {}",
+                self.t_cost,
+                Self::MAX_T_COST
+            ));
+        }
+        if self.p_cost > Self::MAX_P_COST {
+            return over(format!(
+                "{} lanes, the limit is {}",
+                self.p_cost,
+                Self::MAX_P_COST
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether guessing a password costs an attacker less than with the defaults. That
+    /// cost follows memory × passes; lanes only let the work run in parallel.
+    pub fn is_weaker_than_default(&self) -> bool {
+        let cost = |p: &KdfParams| u64::from(p.m_cost) * u64::from(p.t_cost);
+        cost(self) < cost(&KdfParams::default())
+    }
+}
+
 impl Default for KdfParams {
     /// 256 MiB, 3 passes, 4 lanes: 4 times the cost of RFC 9106's memory-constrained
     /// choice for an attacker, and about 270 ms on a recent laptop, with the lanes run in
@@ -203,19 +246,34 @@ impl NativeStore {
         &self.path
     }
 
-    /// Re-encrypts the database under a new password (and a fresh salt).
+    /// The key derivation settings this database uses.
+    pub fn kdf_params(&self) -> KdfParams {
+        self.params
+    }
+
+    /// Re-encrypts the database under a new password, a fresh salt and the current
+    /// default key derivation settings, which upgrades older databases.
     pub fn change_password(&mut self, password: &[u8]) -> Result<()> {
+        self.change_password_with_params(password, KdfParams::default())
+    }
+
+    pub fn change_password_with_params(
+        &mut self,
+        password: &[u8],
+        params: KdfParams,
+    ) -> Result<()> {
         let _lock = lock(&self.path)?;
         let contents = self.reload()?;
         let mut salt = [0u8; SALT_LEN];
         getrandom::fill(&mut salt).map_err(|_| Error::Rng)?;
-        let key = derive_key(password, &salt, self.params)?;
+        let key = derive_key(password, &salt, params)?;
         let previous = (
             std::mem::replace(&mut self.salt, salt),
             std::mem::replace(&mut self.key, key),
+            std::mem::replace(&mut self.params, params),
         );
         if let Err(e) = self.write(&contents) {
-            (self.salt, self.key) = previous;
+            (self.salt, self.key, self.params) = previous;
             return Err(e);
         }
         self.contents = contents;
@@ -387,6 +445,8 @@ fn cipher(key: &[u8; KEY_LEN]) -> XChaCha20Poly1305 {
 }
 
 fn derive_key(password: &[u8], salt: &[u8], params: KdfParams) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    // Before any allocation or work: the settings may come from a tampered file.
+    params.check_limits()?;
     let argon_params =
         argon2::Params::new(params.m_cost, params.t_cost, params.p_cost, Some(KEY_LEN))
             .map_err(|e| Error::Kdf(e.to_string()))?;
@@ -673,7 +733,9 @@ mod tests {
         let mut first = NativeStore::create_with_params(&path, b"old", TEST_PARAMS).unwrap();
         first.put("a", &entry("JBSWY3DPEHPK3PXP")).unwrap();
         let mut second = NativeStore::open(&path, b"old").unwrap();
-        first.change_password(b"new").unwrap();
+        first
+            .change_password_with_params(b"new", TEST_PARAMS)
+            .unwrap();
         assert!(matches!(
             second.put("b", &entry("JBSWY3DPEHPK3PXP")),
             Err(Error::DatabaseChanged(_))
@@ -713,6 +775,142 @@ mod tests {
     }
 
     #[test]
+    fn kdf_limits() {
+        let at_limits = KdfParams {
+            m_cost: KdfParams::MAX_M_COST,
+            t_cost: KdfParams::MAX_T_COST,
+            p_cost: KdfParams::MAX_P_COST,
+        };
+        at_limits.check_limits().unwrap();
+        for (params, what) in [
+            (
+                KdfParams {
+                    m_cost: KdfParams::MAX_M_COST + 1,
+                    ..at_limits
+                },
+                "MiB of memory",
+            ),
+            (
+                KdfParams {
+                    t_cost: KdfParams::MAX_T_COST + 1,
+                    ..at_limits
+                },
+                "passes",
+            ),
+            (
+                KdfParams {
+                    p_cost: KdfParams::MAX_P_COST + 1,
+                    ..at_limits
+                },
+                "lanes",
+            ),
+        ] {
+            let error = params.check_limits().unwrap_err().to_string();
+            assert!(error.contains(what), "{error}");
+        }
+        KdfParams::default().check_limits().unwrap();
+    }
+
+    #[test]
+    fn tampered_kdf_settings_are_refused_before_deriving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        NativeStore::create_with_params(&path, b"pw", TEST_PARAMS).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        // Each of these used to hang or allocate all memory before failing.
+        for (field, value) in [
+            ("t_cost", u32::MAX),
+            ("m_cost", u32::MAX),
+            ("p_cost", 1 << 20),
+        ] {
+            let mut envelope = original.clone();
+            envelope["kdf"][field] = serde_json::json!(value);
+            fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+            let start = std::time::Instant::now();
+            assert!(
+                matches!(NativeStore::open(&path, b"pw"), Err(Error::KdfLimits(_))),
+                "{field}"
+            );
+            assert!(
+                start.elapsed().as_secs() < 1,
+                "{field}: refused only after work"
+            );
+        }
+    }
+
+    #[test]
+    fn databases_cannot_be_created_over_the_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        let params = KdfParams {
+            t_cost: KdfParams::MAX_T_COST + 1,
+            ..TEST_PARAMS
+        };
+        assert!(matches!(
+            NativeStore::create_with_params(&path, b"pw", params),
+            Err(Error::KdfLimits(_))
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn change_password_upgrades_the_kdf_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otp.db");
+        let old = KdfParams {
+            m_cost: 64 * 1024,
+            t_cost: 3,
+            p_cost: 1,
+        };
+        let mut store = NativeStore::create_with_params(&path, b"old", old).unwrap();
+        store.put("a", &entry("JBSWY3DPEHPK3PXP")).unwrap();
+        assert!(store.kdf_params().is_weaker_than_default());
+        store.change_password(b"new").unwrap();
+        assert_eq!(store.kdf_params(), KdfParams::default());
+        let store = NativeStore::open(&path, b"new").unwrap();
+        assert_eq!(store.kdf_params(), KdfParams::default());
+        assert!(!store.kdf_params().is_weaker_than_default());
+        assert_eq!(store.list().unwrap(), ["a"]);
+    }
+
+    #[test]
+    fn weaker_than_default_follows_memory_times_passes() {
+        let default = KdfParams::default();
+        assert!(!default.is_weaker_than_default());
+        // Fewer lanes alone do not make guessing cheaper.
+        assert!(
+            !KdfParams {
+                p_cost: 1,
+                ..default
+            }
+            .is_weaker_than_default()
+        );
+        assert!(
+            KdfParams {
+                m_cost: 64 * 1024,
+                ..default
+            }
+            .is_weaker_than_default()
+        );
+        assert!(
+            KdfParams {
+                t_cost: 1,
+                ..default
+            }
+            .is_weaker_than_default()
+        );
+        assert!(
+            !KdfParams {
+                m_cost: 512 * 1024,
+                t_cost: 2,
+                ..default
+            }
+            .is_weaker_than_default()
+        );
+    }
+
+    #[test]
     fn remove_and_change_password() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("otp.db");
@@ -721,7 +919,9 @@ mod tests {
         store.put("b", &entry("JBSWY3DPEHPK3PXP")).unwrap();
         assert!(store.remove("a").unwrap());
         assert!(!store.remove("a").unwrap());
-        store.change_password(b"new").unwrap();
+        store
+            .change_password_with_params(b"new", TEST_PARAMS)
+            .unwrap();
 
         assert!(matches!(
             NativeStore::open(&path, b"old"),

@@ -37,6 +37,9 @@ pub enum Error {
     #[error("key derivation failed: {0}")]
     Kdf(String),
 
+    #[error("the database's key derivation settings exceed otp's limits: {0}")]
+    KdfLimits(String),
+
     #[error("system random number generator failed")]
     Rng,
 

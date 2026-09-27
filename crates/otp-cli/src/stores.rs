@@ -152,6 +152,23 @@ impl<'a> Stores<'a> {
         Ok(true)
     }
 
+    /// Makes sure the pass store's gpg key is unlocked, by reading `name`. If that needs
+    /// a passphrase, reads it again letting gpg ask for it on the terminal, so gpg-agent
+    /// caches it. For the TUI, before it takes over the terminal.
+    #[cfg(feature = "tui")]
+    pub fn unlock_pass(&mut self, name: &str) -> Result<()> {
+        match self.pass.get(name) {
+            Err(error) if PassStore::is_locked_key_error(&error) => {
+                eprintln!("otp: the gpg key of the pass store is locked; unlocking it");
+                self.pass
+                    .unlock(name)
+                    .context("cannot unlock the gpg key of the pass store, which otp tui needs")
+            }
+            // Other problems with this entry are shown when it is selected.
+            _ => Ok(()),
+        }
+    }
+
     /// Like [`Stores::contains`], but never prompts: a native database that would need
     /// the master password to be typed is not searched.
     #[cfg(feature = "tui")]

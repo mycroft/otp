@@ -133,9 +133,12 @@ so they can be told apart. Elsewhere, use Tab and Ctrl-/ or F1.
 The master password, if needed, is asked before the TUI starts, and never while it runs.
 When the database was not opened at startup (e.g. with `--pass`), creating an entry
 checks it for duplicates only if `password_command` or `OTP_PASSWORD` can open it. The
-same applies to creating the database from the TUI. gpg runs without access to the
-terminal, so use a graphical pinentry (or have gpg-agent unlocked) for pass entries;
-errors are shown in the TUI.
+same applies to creating the database from the TUI. The same goes for the gpg key of
+pass entries: if it is locked, otp decrypts one entry before the TUI starts, so your
+usual pinentry asks for the passphrase, and quits if that fails or is cancelled. gpg
+never asks while the TUI runs (a terminal pinentry would draw over it); if a pass
+command fails then, for instance for an entry encrypted to another, still locked key,
+the TUI quits with the error.
 
 ## Storage
 

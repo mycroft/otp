@@ -64,9 +64,9 @@ impl PassStore {
         self
     }
 
-    /// Keeps `pass show` and `pass insert` away from the terminal: no stdin for `show`,
-    /// and gpg's stderr is captured into the error message instead of being printed.
-    /// For full-screen interfaces.
+    /// Keeps pass away from the terminal: no stdin for `show`, gpg's stderr captured into
+    /// the error message instead of being printed, and no passphrase prompt (a locked
+    /// key fails, see [`PassStore::is_locked_key_error`]). For full-screen interfaces.
     pub fn non_interactive(mut self) -> Self {
         self.interactive = false;
         self
@@ -82,11 +82,62 @@ impl PassStore {
     }
 
     fn command(&self, args: &[&str]) -> Command {
+        self.build_command(args, self.interactive)
+    }
+
+    /// `pass ARGS...`; without `allow_prompt`, gpg must not ask for a passphrase.
+    fn build_command(&self, args: &[&str], allow_prompt: bool) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(args)
             .env("PASSWORD_STORE_DIR", &self.store_dir)
             .envs(self.envs.iter().map(|(k, v)| (k, v)));
+        if !allow_prompt {
+            // gpg-agent would otherwise start pinentry for a locked key, and a terminal
+            // pinentry (pinentry-curses, pinentry-tty) draws over a full-screen
+            // interface. gpg fails with "No pinentry" instead.
+            const GPG_OPTS: &str = "PASSWORD_STORE_GPG_OPTS";
+            let mut options = self
+                .envs
+                .iter()
+                .rev()
+                .find(|(key, _)| key == GPG_OPTS)
+                .map(|(_, value)| value.clone())
+                .or_else(|| std::env::var_os(GPG_OPTS))
+                .unwrap_or_default();
+            if !options.is_empty() {
+                options.push(" ");
+            }
+            options.push("--pinentry-mode error");
+            cmd.env(GPG_OPTS, options);
+        }
         cmd
+    }
+
+    /// Decrypts `name` letting gpg ask for the passphrase on the terminal, even in
+    /// non-interactive mode, so that gpg-agent caches it. The contents are discarded. For
+    /// full-screen interfaces, before they take over the terminal.
+    pub fn unlock(&self, name: &str) -> Result<()> {
+        let pass_name = Self::pass_name(name);
+        let output = self
+            .build_command(&["show", "--", &pass_name], true)
+            .stdin(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|e| self.spawn_error(e))?;
+        drop(Zeroizing::new(output.stdout));
+        if !output.status.success() {
+            return Err(Error::Pass(format!(
+                "`pass show {pass_name}` failed ({})",
+                output.status
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether `error` means gpg needed a passphrase that, being non-interactive, it
+    /// could not ask for: the key is locked.
+    pub fn is_locked_key_error(error: &Error) -> bool {
+        matches!(error, Error::Pass(message) if message.contains("No pinentry"))
     }
 
     fn spawn_error(&self, e: std::io::Error) -> Error {

@@ -5,7 +5,7 @@ use std::io::{IsTerminal, stdout};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use otp_core::store::Backend;
+use otp_core::store::{Backend, PassStore};
 use otp_core::{Entry, Kind, OtpSecret, qr, validate_name};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
@@ -42,8 +42,12 @@ pub fn run(
     if !stdout().is_terminal() {
         bail!("otp tui needs a terminal");
     }
-    // Listing may ask for the master password, so it happens before the TUI starts.
+    // Listing may ask for the master password, so it happens before the TUI starts...
     let rows = stores.list(only)?;
+    // ...and so does unlocking the gpg key of pass entries: the TUI cannot prompt.
+    if let Some((name, _)) = rows.iter().find(|(_, backend)| *backend == Backend::Pass) {
+        stores.unlock_pass(name)?;
+    }
     let mut app = App::new(rows);
     app.group_digits = config.tui.group_digits;
     app.hide_code = hidden;
@@ -76,7 +80,7 @@ fn event_loop(
     config: &Config,
 ) -> Result<Option<(usize, Output)>> {
     loop {
-        app.load_selected(&mut |name, backend| fetch(stores, name, backend));
+        load(app, stores)?;
         terminal.draw(|frame| app.render(frame, SystemTime::now()))?;
         // Wake up regularly so TOTP codes and countdowns stay current.
         if !event::poll(Duration::from_millis(250))? {
@@ -108,12 +112,43 @@ fn event_loop(
                 }
                 // These windows act on the entry: decrypt it before the next key.
                 if matches!(app.mode, Mode::Inspect | Mode::QrCode) {
-                    app.load_selected(&mut |name, backend| fetch(stores, name, backend));
+                    load(app, stores)?;
                 }
             }
             if !event::poll(Duration::ZERO)? {
                 break;
             }
+        }
+    }
+}
+
+/// Decrypts the selected entry, if not done yet. A failed pass command ends the TUI with
+/// its error: usually the gpg key is locked, and no pass entry can be read until it is
+/// unlocked, which the TUI cannot do (it runs gpg without pinentry).
+fn load(app: &mut App, stores: &mut Stores) -> Result<()> {
+    let mut failed = None;
+    app.load_selected(&mut |name, backend| {
+        let entry = fetch(stores, name, backend);
+        if let Err(error) = &entry
+            && let Some(error @ otp_core::Error::Pass(_)) = error.downcast_ref()
+        {
+            failed = Some((name.to_string(), PassStore::is_locked_key_error(error)));
+        }
+        entry
+    });
+    match failed {
+        None => Ok(()),
+        Some((name, locked)) => {
+            let error = app.loaded_error().unwrap_or_default();
+            if locked {
+                bail!(
+                    "{error}\n  The gpg key of the pass store is locked, and otp tui cannot ask \
+                     for its passphrase. Unlock it first, e.g. with `pass show {}`, then start \
+                     otp tui again.",
+                    PassStore::pass_name(&name)
+                );
+            }
+            bail!("cannot read {name} from pass: {error}");
         }
     }
 }
@@ -561,6 +596,14 @@ impl App {
     fn selected_entry(&self) -> Option<&Entry> {
         match self.loaded.get(&self.selected()?) {
             Some(Ok(entry)) => Some(entry),
+            _ => None,
+        }
+    }
+
+    /// The error recorded for the selected entry, if its decryption failed.
+    fn loaded_error(&self) -> Option<String> {
+        match self.loaded.get(&self.selected()?) {
+            Some(Err(error)) => Some(error.clone()),
             _ => None,
         }
     }

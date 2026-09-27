@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use otp_core::store::Backend;
 use serde::Deserialize;
 
-/// `~/.config/otp/config.toml` (or `$OTP_CONFIG`).
+/// `~/.config/otp/config.toml`, or the file given with `--config` or `$OTP_CONFIG_FILE`.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -37,6 +37,9 @@ pub struct Config {
     /// `[tui]` section. Accepted even without the `tui` feature, so one config file
     /// works with every build.
     pub tui: TuiConfig,
+    /// The file this configuration was read from, if any.
+    #[serde(skip)]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,6 +72,7 @@ impl Default for Config {
             clipboard_clear_command: vec!["wl-copy".into(), "--clear".into()],
             password_store_dir: None,
             tui: TuiConfig::default(),
+            file: None,
         }
     }
 }
@@ -88,23 +92,32 @@ impl Config {
         })
     }
 
-    pub fn load() -> Result<Self> {
-        let path = match std::env::var_os("OTP_CONFIG") {
-            Some(path) => PathBuf::from(path),
-            None => match dirs::config_dir() {
-                Some(dir) => dir.join("otp/config.toml"),
-                None => return Ok(Config::default()),
+    /// Loads the configuration file: `explicit` (`--config`), else `$OTP_CONFIG_FILE`, else
+    /// `~/.config/otp/config.toml`. A file named with `--config` or `$OTP_CONFIG_FILE` must
+    /// exist; the default one is optional.
+    pub fn load(explicit: Option<&Path>) -> Result<Self> {
+        let (path, required) = match explicit {
+            Some(path) => (path.to_path_buf(), true),
+            None => match std::env::var_os("OTP_CONFIG_FILE") {
+                Some(path) => (PathBuf::from(path), true),
+                None => match dirs::config_dir() {
+                    Some(dir) => (dir.join("otp/config.toml"), false),
+                    None => return Ok(Config::default()),
+                },
             },
         };
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => {
+                return Ok(Config::default());
+            }
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         let mut config: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         config.database = config.database.map(|p| expand_tilde(&p));
         config.password_store_dir = config.password_store_dir.map(|p| expand_tilde(&p));
+        config.file = Some(path);
         Ok(config)
     }
 

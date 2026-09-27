@@ -26,6 +26,10 @@ use crate::stores::Stores;
 #[derive(Parser)]
 #[command(name = "otp", version, args_conflicts_with_subcommands = true)]
 struct Cli {
+    /// Configuration file to use instead of ~/.config/otp/config.toml
+    #[arg(long, global = true, value_name = "FILE", env = "OTP_CONFIG_FILE")]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -248,7 +252,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let config = Config::load()?;
+    let config = Config::load(cli.config.as_deref())?;
     let db_path = config.database_path()?;
     let password = PasswordSource::new(config.password_command.as_deref());
     let pass = PassStore::new(config.password_store_dir.clone());
@@ -634,7 +638,7 @@ fn copy_to_clipboard(config: &Config, text: &str) -> Result<()> {
         bail!("clipboard command {program:?} failed ({status})");
     }
     if config.clipboard_timeout > 0 {
-        schedule_clipboard_clear(config.clipboard_timeout, text)
+        schedule_clipboard_clear(config, config.clipboard_timeout, text)
             .context("scheduling the clipboard clearing")?;
     }
     Ok(())
@@ -642,8 +646,12 @@ fn copy_to_clipboard(config: &Config, text: &str) -> Result<()> {
 
 /// Starts `otp __clear-clipboard SECONDS` in the background. It outlives this process,
 /// and receives only a hash of the copied value, on stdin.
-fn schedule_clipboard_clear(seconds: u64, text: &str) -> Result<()> {
+fn schedule_clipboard_clear(config: &Config, seconds: u64, text: &str) -> Result<()> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
+    // It reads the same configuration file, for its paste and clear commands.
+    if let Some(file) = &config.file {
+        command.env("OTP_CONFIG_FILE", file);
+    }
     command
         .args(["__clear-clipboard", &seconds.to_string()])
         .stdin(Stdio::piped())

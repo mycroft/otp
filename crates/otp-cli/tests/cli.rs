@@ -24,6 +24,8 @@ impl Env {
             dir: tempfile::tempdir().unwrap(),
         };
         fs::create_dir_all(env.pass_dir()).unwrap();
+        // OTP_CONFIG_FILE must name an existing file; tests replace it as needed.
+        env.write_config("");
         env
     }
 
@@ -81,7 +83,7 @@ esac
         cmd.env_clear()
             .env("PATH", path)
             .env("HOME", self.dir.path())
-            .env("OTP_CONFIG", self.path("config.toml"))
+            .env("OTP_CONFIG_FILE", self.path("config.toml"))
             .env("OTP_DB", self.path("data/otp.db"))
             .env("OTP_PASSWORD", PASSWORD)
             .env("PASSWORD_STORE_DIR", self.pass_dir());
@@ -1370,4 +1372,104 @@ fn score_check_can_be_disabled() {
         .assert()
         .success()
         .stdout("755224\n");
+}
+
+#[test]
+fn config_file_from_flag_or_environment() {
+    let env = Env::new();
+    env.insert_uri("x", HOTP_URI);
+    // Each file sends copies to its own marker file.
+    let config = |name: &str| {
+        let path = env.path(&format!("{name}.toml"));
+        fs::write(
+            &path,
+            format!(
+                "clipboard_command = [\"sh\", \"-c\", \"cat > '{}'\"]\nclipboard_timeout = 0\n",
+                env.path(&format!("{name}.clip")).display()
+            ),
+        )
+        .unwrap();
+        path
+    };
+    let (flag, file_env) = (config("flag"), config("file-env"));
+    let copied_by = |name: &str| env.path(&format!("{name}.clip")).exists();
+
+    // OTP_CONFIG_FILE selects the file...
+    env.otp()
+        .env("OTP_CONFIG_FILE", &file_env)
+        .args(["-c", "x"])
+        .assert()
+        .success();
+    assert!(copied_by("file-env"));
+    // ...and --config wins over it, before or after a subcommand.
+    env.otp()
+        .env("OTP_CONFIG_FILE", &file_env)
+        .args(["--config", flag.to_str().unwrap(), "-c", "x"])
+        .assert()
+        .success();
+    assert!(copied_by("flag"));
+    fs::remove_file(env.path("flag.clip")).unwrap();
+    env.otp()
+        .args(["code", "-c", "x", "--config", flag.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(copied_by("flag"));
+}
+
+#[test]
+fn named_config_file_must_exist() {
+    let env = Env::new();
+    let missing = env.path("missing.toml");
+    env.otp()
+        .args(["--config", missing.to_str().unwrap(), "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing.toml"));
+    env.otp()
+        .env("OTP_CONFIG_FILE", &missing)
+        .arg("list")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing.toml"));
+    // The default location (~/.config/otp/config.toml, in the test's HOME) is optional.
+    env.otp()
+        .env_remove("OTP_CONFIG_FILE")
+        .arg("list")
+        .assert()
+        .success();
+    // OTP_CONFIG is not read anymore.
+    env.otp()
+        .env_remove("OTP_CONFIG_FILE")
+        .env("OTP_CONFIG", &missing)
+        .arg("list")
+        .assert()
+        .success();
+}
+
+#[test]
+fn clipboard_clearing_uses_the_same_config_file() {
+    let env = Env::new();
+    env.insert_uri("x", HOTP_URI);
+    // A file clipboard defined only in a --config file, not in the default config.
+    let clip = env.path("clipboard");
+    let alternate = env.path("alternate.toml");
+    fs::write(
+        &alternate,
+        format!(
+            "clipboard_command = [\"sh\", \"-c\", \"cat > '{clip}'\"]\n\
+             clipboard_paste_command = [\"cat\", \"{clip}\"]\n\
+             clipboard_clear_command = [\"sh\", \"-c\", \": > '{clip}'\"]\n\
+             clipboard_timeout = 1\n",
+            clip = clip.display()
+        ),
+    )
+    .unwrap();
+    env.otp()
+        .args(["--config", alternate.to_str().unwrap(), "-c", "x"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&clip).unwrap(), "755224");
+    wait_until("the clipboard to be cleared", || {
+        fs::read_to_string(&clip).unwrap().is_empty()
+    });
 }

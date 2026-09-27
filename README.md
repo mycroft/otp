@@ -169,7 +169,9 @@ has free-form notes after the URI, those lines are kept when otp rewrites the en
 
 ## Configuration
 
-`~/.config/otp/config.toml` (or `$OTP_CONFIG`). Every key is optional. A commented
+`~/.config/otp/config.toml`, or the file given with `--config FILE` or
+`$OTP_CONFIG_FILE` (`--config` wins). A file named this way must exist. Every key is
+optional. A commented
 sample is in [`contrib/config.toml.sample`](contrib/config.toml.sample).
 
 ```toml

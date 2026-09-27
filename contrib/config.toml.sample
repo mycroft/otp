@@ -1,5 +1,6 @@
 # Sample otp configuration.
-# Copy to ~/.config/otp/config.toml (or point $OTP_CONFIG at it).
+# Copy to ~/.config/otp/config.toml, or use it with `otp --config FILE` or
+# OTP_CONFIG_FILE=FILE.
 # Every key is optional; the values below are the defaults unless noted.
 
 # Default store, as if --pass ("pass") or --native ("database") were given to

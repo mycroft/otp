@@ -55,7 +55,8 @@ fn candidates(current: &OsStr, with_entries: bool) -> Vec<CompletionCandidate> {
 
 /// `(name, store)` of every entry that can be listed without prompting.
 fn stored_names() -> Vec<(String, Backend)> {
-    let Ok(config) = Config::load() else {
+    // `--config` is not visible here; OTP_CONFIG_FILE is.
+    let Ok(config) = Config::load(None) else {
         return Vec::new();
     };
     let only = config.backend();

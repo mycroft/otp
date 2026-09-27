@@ -10,6 +10,11 @@
 # Native encrypted database. $OTP_DB takes precedence.
 database = "~/.local/share/otp/otp.db"
 
+# New master passwords (database creation, `otp passwd`) need at least 12
+# characters and, with this check, the top zxcvbn strength score: more than 10^10
+# estimated guesses. false keeps only the length requirement.
+password_score_check = true
+
 # Command printing the master password on its first stdout line, to avoid
 # being prompted on every use. No default: otp prompts when unset.
 # $OTP_PASSWORD takes precedence.

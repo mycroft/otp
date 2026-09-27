@@ -13,6 +13,9 @@ pub struct Config {
     pub backend: Option<BackendChoice>,
     /// Native database path. `$OTP_DB` takes precedence.
     pub database: Option<PathBuf>,
+    /// Refuse new master passwords that zxcvbn finds guessable (score below 4). With false,
+    /// only the minimum length of 12 characters is required.
+    pub password_score_check: bool,
     /// Command printing the master password on stdout, e.g. `["pass", "show", "otp/master"]`.
     pub password_command: Option<Vec<String>>,
     /// Screenshot command for `insert --qrcode`; `{file}` is the PNG path to write.
@@ -52,6 +55,7 @@ impl Default for Config {
         Config {
             backend: None,
             database: None,
+            password_score_check: true,
             password_command: None,
             capture_command: otp_core::qr::DEFAULT_CAPTURE_COMMAND
                 .iter()

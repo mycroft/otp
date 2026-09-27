@@ -258,7 +258,7 @@ fn run(cli: Cli) -> Result<()> {
         Some(Command::Tui { .. }) => pass.non_interactive(),
         _ => pass,
     };
-    let mut stores = Stores::new(db_path, password, pass);
+    let mut stores = Stores::new(db_path, password, pass, config.password_score_check);
     let default = config.backend();
 
     match cli.command {
@@ -281,7 +281,7 @@ fn run(cli: Cli) -> Result<()> {
             force,
             only,
         }) => move_entry(&mut stores, &from, &to, force, only.only(default)),
-        Some(Command::Passwd) => passwd(&mut stores),
+        Some(Command::Passwd) => passwd(&mut stores, &config),
         Some(Command::ClearClipboard { seconds }) => clear_clipboard_later(&config, seconds),
         #[cfg(feature = "tui")]
         Some(Command::Tui { hidden, only }) => {
@@ -569,9 +569,10 @@ fn move_entry(
     Ok(())
 }
 
-fn passwd(stores: &mut Stores) -> Result<()> {
+fn passwd(stores: &mut Stores, config: &Config) -> Result<()> {
     let store = stores.native_for_passwd()?;
-    let password = PasswordSource::Prompt.new_password("New master password")?;
+    let password =
+        PasswordSource::Prompt.new_password("New master password", config.password_score_check)?;
     store.change_password(password.as_bytes())?;
     eprintln!("Master password changed.");
     Ok(())

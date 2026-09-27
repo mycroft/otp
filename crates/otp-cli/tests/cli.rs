@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// The master password of the test databases: strong enough to create them.
+const PASSWORD: &str = "violet anchor rhythm quartz";
+
 // RFC 4226 test secret "12345678901234567890".
 const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 const HOTP_URI: &str =
@@ -80,7 +83,7 @@ esac
             .env("HOME", self.dir.path())
             .env("OTP_CONFIG", self.path("config.toml"))
             .env("OTP_DB", self.path("data/otp.db"))
-            .env("OTP_PASSWORD", "correct horse")
+            .env("OTP_PASSWORD", PASSWORD)
             .env("PASSWORD_STORE_DIR", self.pass_dir());
         cmd
     }
@@ -325,7 +328,7 @@ fn wrong_password_fails() {
 #[test]
 fn password_command_is_used() {
     let env = Env::new();
-    env.write_config("password_command = [\"echo\", \"from command\"]\n");
+    env.write_config("password_command = [\"echo\", \"trellis harbor mosaic lantern\"]\n");
     let insert = |password: Option<&str>| {
         let mut cmd = env.otp();
         cmd.env_remove("OTP_PASSWORD");
@@ -340,7 +343,7 @@ fn password_command_is_used() {
         .assert()
         .success();
     insert(None).arg("x").assert().success().stdout("755224\n");
-    insert(Some("from command"))
+    insert(Some("trellis harbor mosaic lantern"))
         .arg("x")
         .assert()
         .success()
@@ -1123,7 +1126,7 @@ fn show_escapes_labels_saved_by_older_versions() {
 
     // Before labels were validated, such an entry could be saved.
     let env = Env::new();
-    let mut store = NativeStore::create(env.path("data/otp.db"), b"correct horse").unwrap();
+    let mut store = NativeStore::create(env.path("data/otp.db"), PASSWORD.as_bytes()).unwrap();
     let mut otp = OtpSecret::from_base32("JBSWY3DPEHPK3PXP", Kind::Totp { period: 30 }).unwrap();
     otp.issuer = Some("\u{1b}]0;PWNED\u{7}".into());
     otp.account = Some("\u{1b}[2J".into());
@@ -1150,12 +1153,13 @@ fn master_password_is_not_passed_to_child_processes() {
     let png = env.path("qr.png");
     write_qr_png(&png, HOTP_URI);
     env.write_config(&format!(
-        "password_command = [\"sh\", \"-c\", \"{password}; echo 'correct horse'\"]\n\
+        "password_command = [\"sh\", \"-c\", \"{password}; echo '{master}'\"]\n\
          clipboard_command = [\"sh\", \"-c\", \"{clipboard}; cat > /dev/null\"]\n\
          clipboard_timeout = 0\n\
          capture_command = [\"sh\", \"-c\", \"{capture}; cp {png} \\\"$0\\\"\"]\n\
          qrcode_viewer_command = [\"sh\", \"-c\", \"{viewer}\"]\n",
         password = dump("password"),
+        master = PASSWORD,
         clipboard = dump("clipboard"),
         capture = dump("capture"),
         viewer = dump("viewer"),
@@ -1191,10 +1195,7 @@ fn master_password_is_not_passed_to_child_processes() {
         let seen =
             fs::read_to_string(dumps.join(tool)).unwrap_or_else(|_| panic!("{tool} did not run"));
         assert!(!seen.contains("OTP_PASSWORD"), "{tool} got OTP_PASSWORD");
-        assert!(
-            !seen.contains("correct horse"),
-            "{tool} got the master password"
-        );
+        assert!(!seen.contains(PASSWORD), "{tool} got the master password");
         assert!(
             seen.contains("OTP_DB="),
             "{tool}: the rest of the environment is kept"
@@ -1290,4 +1291,83 @@ fn default_clipboard_command_is_sensitive() {
     env.insert_uri("x", HOTP_URI);
     env.otp().args(["-c", "x"]).assert().success();
     assert_eq!(fs::read_to_string(&args).unwrap(), "--sensitive\n");
+}
+
+#[test]
+fn weak_master_passwords_cannot_create_a_database() {
+    let env = Env::new();
+    for (password, error) in [
+        ("short", "at least 12 characters"),
+        ("correct horse", "too easy to guess"),
+        ("password1234", "too easy to guess"),
+    ] {
+        env.otp()
+            .env("OTP_PASSWORD", password)
+            .args(["insert", "x"])
+            .write_stdin(format!("{HOTP_URI}\n"))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(error));
+        assert!(
+            !env.path("data/otp.db").exists(),
+            "{password:?} created a database"
+        );
+    }
+    // The same applies to a password from password_command.
+    env.write_config("password_command = [\"echo\", \"Summer2026!!\"]\n");
+    env.otp()
+        .env_remove("OTP_PASSWORD")
+        .args(["insert", "x"])
+        .write_stdin(format!("{HOTP_URI}\n"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("too easy to guess"));
+    assert!(!env.path("data/otp.db").exists());
+}
+
+#[test]
+fn weak_existing_databases_still_open() {
+    use otp_core::store::{NativeStore, Store};
+    use otp_core::{Entry, Kind, OtpSecret};
+
+    // Created before passwords were checked.
+    let env = Env::new();
+    let mut store = NativeStore::create(env.path("data/otp.db"), b"hunter2").unwrap();
+    let otp = OtpSecret::from_base32(SECRET, Kind::Hotp { counter: 0 }).unwrap();
+    store.put("x", &Entry::new(otp)).unwrap();
+    // No warning either: it is only shown for typed passwords.
+    env.otp()
+        .env("OTP_PASSWORD", "hunter2")
+        .arg("x")
+        .assert()
+        .success()
+        .stdout("755224\n")
+        .stderr("");
+}
+
+#[test]
+fn score_check_can_be_disabled() {
+    let env = Env::new();
+    env.write_config("password_score_check = false\n");
+    // The minimum length still applies...
+    env.otp()
+        .env("OTP_PASSWORD", "hunter2")
+        .args(["insert", "x"])
+        .write_stdin(format!("{HOTP_URI}\n"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("at least 12 characters"));
+    // ...but a guessable password of 12 characters or more is accepted.
+    env.otp()
+        .env("OTP_PASSWORD", "correct horse")
+        .args(["insert", "x"])
+        .write_stdin(format!("{HOTP_URI}\n"))
+        .assert()
+        .success();
+    env.otp()
+        .env("OTP_PASSWORD", "correct horse")
+        .arg("x")
+        .assert()
+        .success()
+        .stdout("755224\n");
 }

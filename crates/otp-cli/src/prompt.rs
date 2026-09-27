@@ -90,20 +90,64 @@ impl<'a> PasswordSource<'a> {
     }
 
     /// Gets a password for a new database, asking twice when prompting.
-    pub fn new_password(&self, what: &str) -> Result<Zeroizing<String>> {
+    /// Whether the password is typed at a prompt (not from OTP_PASSWORD or a command).
+    pub fn is_prompt(&self) -> bool {
+        matches!(self, PasswordSource::Prompt)
+    }
+
+    /// Gets a password for a new database, asking twice when prompting. It must pass
+    /// [`check_strength`], wherever it comes from.
+    pub fn new_password(&self, what: &str, check_score: bool) -> Result<Zeroizing<String>> {
         let PasswordSource::Prompt = self else {
-            return self.existing();
+            let password = self.existing()?;
+            check_strength(&password, check_score)?;
+            return Ok(password);
         };
         let password = Zeroizing::new(rpassword::prompt_password(format!("{what}: "))?);
-        if password.is_empty() {
-            bail!("the master password must not be empty");
-        }
+        // Checked before asking again, so a weak password is not typed twice.
+        check_strength(&password, check_score)?;
         let again = Zeroizing::new(rpassword::prompt_password(format!("Repeat {what}: "))?);
         if password != again {
             bail!("passwords do not match");
         }
         Ok(password)
     }
+}
+
+/// Minimum length of a new master password, in characters.
+pub const MIN_PASSWORD_LENGTH: usize = 12;
+
+/// Checks a new master password: at least [`MIN_PASSWORD_LENGTH`] characters and, with
+/// `check_score` (the `password_score_check` setting), the top zxcvbn score, 4: more
+/// than 10^10 estimated guesses. A stolen database file can be attacked offline; score 3
+/// starts at 10^8 guesses and admits "correct horse".
+pub fn check_strength(password: &str, check_score: bool) -> Result<()> {
+    let length = password.chars().count();
+    if length < MIN_PASSWORD_LENGTH {
+        bail!(
+            "the master password must be at least {MIN_PASSWORD_LENGTH} characters long \
+             (it has {length}); a passphrase of 4 or more random words is easy to remember"
+        );
+    }
+    if !check_score {
+        return Ok(());
+    }
+    let estimate = zxcvbn::zxcvbn(password, &["otp"]);
+    if estimate.score() < zxcvbn::Score::Four {
+        let mut message = "the master password is too easy to guess".to_string();
+        if let Some(feedback) = estimate.feedback() {
+            if let Some(warning) = feedback.warning() {
+                message.push_str(&format!(": {warning}"));
+            }
+            for suggestion in feedback.suggestions() {
+                message.push_str(&format!("\n  {suggestion}"));
+            }
+        }
+        message
+            .push_str("\n  A passphrase of 4 or more random words is strong and easy to remember.");
+        bail!(message);
+    }
+    Ok(())
 }
 
 fn run_password_command(command: &[String], interactive: bool) -> Result<Zeroizing<String>> {
@@ -132,4 +176,60 @@ fn run_password_command(command: &[String], interactive: bool) -> Result<Zeroizi
     Ok(Zeroizing::new(
         text.lines().next().unwrap_or("").to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_strength;
+
+    #[test]
+    fn rejects_short_and_guessable_passwords() {
+        // zxcvbn scores these 0 to 3 (at most 10^8.2 estimated guesses).
+        for weak in [
+            "",
+            "hunter2",
+            "correct horse",
+            "Summer2026!!",
+            "password1234",
+            "Password123!",
+            "123456789012",
+            "otp-password",
+            "aaaaaaaaaaaaaaaa",
+        ] {
+            assert!(
+                check_strength(weak, true).is_err(),
+                "{weak:?} should be refused"
+            );
+        }
+        let error = check_strength("short", true).unwrap_err().to_string();
+        assert!(error.contains("at least 12 characters"), "{error}");
+        let error = check_strength("password1234", true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("too easy to guess"), "{error}");
+        assert!(error.contains("random words"), "{error}");
+    }
+
+    #[test]
+    fn score_check_can_be_disabled_but_not_the_length() {
+        assert!(check_strength("correct horse", false).is_ok());
+        assert!(check_strength("password1234", false).is_ok());
+        let error = check_strength("hunter2", false).unwrap_err().to_string();
+        assert!(error.contains("at least 12 characters"), "{error}");
+    }
+
+    #[test]
+    fn accepts_passphrases() {
+        for strong in [
+            "violet anchor rhythm quartz",
+            "correct horse battery staple",
+            "Tr0ub4dor&3-plus-length",
+            "k7#Qm2!vX9pL",
+        ] {
+            assert!(
+                check_strength(strong, true).is_ok(),
+                "{strong:?} should be accepted"
+            );
+        }
+    }
 }

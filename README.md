@@ -143,7 +143,11 @@ errors are shown in the TUI.
 payload is encrypted with XChaCha20-Poly1305. The key is derived from the master password
 with Argon2id (256 MiB, 3 passes, 4 lanes in parallel; databases created by earlier
 versions keep their 64 MiB, 1 lane settings), and the header (format, KDF parameters, salt) is
-authenticated. Entry names are encrypted too. Writes are atomic, and the file is mode
+authenticated. A new master password needs at least 12 characters and zxcvbn's top
+strength score, 4: more than 10^10 estimated guesses (4 random words or 12 random
+characters pass); `password_score_check = false` keeps only the length. Opening a
+database with a weaker typed password prints a warning suggesting `otp passwd`.
+Entry names are encrypted too. Writes are atomic, and the file is mode
 0600. Every change takes an exclusive lock on `otp.db.lock` and applies to the file as it
 is at that moment, so several otp processes (a TUI left open, an `insert` waiting at its
 prompt) never undo each other's changes.
@@ -171,6 +175,7 @@ sample is in [`contrib/config.toml.sample`](contrib/config.toml.sample).
 ```toml
 backend = "pass"          # or "database"; default for --pass/--native (unset: both)
 database = "~/.local/share/otp/otp.db"
+password_score_check = true   # refuse guessable new master passwords (zxcvbn)
 # Get the master password from a command instead of prompting:
 password_command = ["pass", "show", "otp/master"]
 capture_command = ["grimshot", "save", "area", "{file}"]   # {file}: PNG to write

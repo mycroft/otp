@@ -134,6 +134,18 @@ impl PassStore {
         Ok(())
     }
 
+    /// Like [`Store::get`], also telling whether the entry has free-form lines after its
+    /// URI (notes from pass-otp or added by hand), which an [`Entry`] cannot hold.
+    pub fn get_with_notes(&self, name: &str) -> Result<Option<(Entry, bool)>> {
+        if !self.contains(name)? {
+            return Ok(None);
+        }
+        let contents = self.show(name)?;
+        let (_, rest) = split(&contents);
+        let has_notes = !is_metadata(rest);
+        parse(&contents).map(|entry| Some((entry, has_notes)))
+    }
+
     /// Whether `error` means gpg needed a passphrase that, being non-interactive, it
     /// could not ask for: the key is locked.
     pub fn is_locked_key_error(error: &Error) -> bool {
@@ -264,11 +276,7 @@ impl Store for PassStore {
     }
 
     fn get(&self, name: &str) -> Result<Option<Entry>> {
-        if !self.contains(name)? {
-            return Ok(None);
-        }
-        let contents = self.show(name)?;
-        parse(&contents).map(Some)
+        Ok(self.get_with_notes(name)?.map(|(entry, _)| entry))
     }
 
     fn put(&mut self, name: &str, entry: &Entry) -> Result<()> {
@@ -276,9 +284,7 @@ impl Store for PassStore {
         let trailer = if self.contains(name)? {
             let existing = self.show(name)?;
             let (_, rest) = split(&existing);
-            let rest = rest.trim();
-            let is_ours = rest.is_empty() || serde_json::from_str::<Metadata>(rest).is_ok();
-            (!is_ours).then(|| Zeroizing::new(rest.to_string()))
+            (!is_metadata(rest)).then(|| Zeroizing::new(rest.trim().to_string()))
         } else {
             None
         };
@@ -358,6 +364,12 @@ fn failure(command: &str, status: std::process::ExitStatus, stderr: &[u8]) -> Er
         Some(detail) => format!("`{command}` failed: {}", detail.trim()),
         None => format!("`{command}` failed ({status})"),
     })
+}
+
+/// Whether the lines after the URI are empty or otp's JSON metadata, rather than notes.
+fn is_metadata(rest: &str) -> bool {
+    let rest = rest.trim();
+    rest.is_empty() || serde_json::from_str::<Metadata>(rest).is_ok()
 }
 
 fn split(contents: &str) -> (&str, &str) {

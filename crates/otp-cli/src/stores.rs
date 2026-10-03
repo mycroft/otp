@@ -56,6 +56,10 @@ impl<'a> Stores<'a> {
         Ok(self.native.as_mut())
     }
 
+    pub fn pass(&self) -> &PassStore {
+        &self.pass
+    }
+
     /// Returns the store for `backend`, or `None` if the native database does not exist.
     pub fn get(&mut self, backend: Backend) -> Result<Option<&mut dyn Store>> {
         Ok(match backend {

@@ -143,6 +143,8 @@ fn pass_store_end_to_end() {
     );
     assert!(store.update("missing", &mut |_| {}).is_err());
 
+    // Entries written by otp have no notes; foreign ones may.
+    assert!(!store.get_with_notes(name).unwrap().unwrap().1);
     // Foreign entries keep their trailing notes when rewritten.
     let foreign = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP\nrecovery: 1111 2222\n";
     pass(
@@ -151,7 +153,8 @@ fn pass_store_end_to_end() {
         &["insert", "-m", "notes-otp"],
         Some(foreign),
     );
-    let notes = store.get("notes").unwrap().unwrap();
+    let (notes, has_notes) = store.get_with_notes("notes").unwrap().unwrap();
+    assert!(has_notes);
     store.put("notes", &notes).unwrap();
     let raw = pass(&gpg, store_dir.path(), &["show", "notes-otp"], None);
     assert!(raw.ends_with("\nrecovery: 1111 2222\n"), "got {raw:?}");

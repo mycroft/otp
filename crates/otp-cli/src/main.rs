@@ -92,6 +92,8 @@ enum Command {
         #[command(flatten)]
         only: BackendArgs,
     },
+    /// Copy entries from one store to the other (or move them with --remove)
+    Migrate(MigrateArgs),
     /// Change the master password of the native database
     Passwd,
     /// Clears the clipboard after SECONDS if it still holds the value hashed on stdin
@@ -220,6 +222,33 @@ struct InsertArgs {
     force: bool,
 }
 
+#[derive(Args)]
+struct MigrateArgs {
+    /// Destination store; entries are read from the other one
+    #[arg(long, value_enum)]
+    to: StoreArg,
+    /// Only migrate entries whose name starts with PREFIX
+    #[arg(add = ArgValueCompleter::new(complete::entry_names))]
+    prefix: Option<String>,
+    /// Remove the entries from the source store once copied: move instead of copy
+    #[arg(long)]
+    remove: bool,
+    /// Replace entries already in the destination, and drop pass notes the database
+    /// cannot keep
+    #[arg(long)]
+    overwrite: bool,
+    /// Only print what would be migrated
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StoreArg {
+    Pass,
+    #[value(alias = "database")]
+    Native,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum AlgorithmArg {
     Sha1,
@@ -285,6 +314,7 @@ fn run(cli: Cli) -> Result<()> {
             force,
             only,
         }) => move_entry(&mut stores, &from, &to, force, only.only(default)),
+        Some(Command::Migrate(args)) => migrate(&mut stores, args),
         Some(Command::Passwd) => passwd(&mut stores, &config),
         Some(Command::ClearClipboard { seconds }) => clear_clipboard_later(&config, seconds),
         #[cfg(feature = "tui")]
@@ -581,6 +611,144 @@ fn move_entry(
     let store = stores.get(backend)?.expect("located store exists");
     store.rename(from, &to, force)?;
     eprintln!("Moved {from} to {to} in the {backend} store.");
+    Ok(())
+}
+
+/// `otp migrate --to STORE [PREFIX]`: copies (or moves) entries from the other store.
+fn migrate(stores: &mut Stores, args: MigrateArgs) -> Result<()> {
+    let (from, to) = match args.to {
+        StoreArg::Pass => (Backend::Native, Backend::Pass),
+        StoreArg::Native => (Backend::Pass, Backend::Native),
+    };
+    let prefix = args.prefix.as_deref().unwrap_or("");
+    let names: Vec<String> = match stores.get(from)? {
+        Some(store) => store.list()?,
+        None => Vec::new(),
+    }
+    .into_iter()
+    .filter(|name| name.starts_with(prefix))
+    .collect();
+    if names.is_empty() {
+        eprintln!("Nothing to migrate: no matching entries in the {from} store.");
+        return Ok(());
+    }
+
+    // Read every entry first, so nothing is written if one cannot be read.
+    let mut entries = Vec::new();
+    for name in &names {
+        let (entry, has_notes) = match from {
+            Backend::Pass => stores.pass().get_with_notes(name)?,
+            Backend::Native => {
+                let store = stores.get(from)?.expect("listed store exists");
+                store.get(name)?.map(|entry| (entry, false))
+            }
+        }
+        .with_context(|| format!("{name} disappeared from the {from} store"))?;
+        entries.push((name.as_str(), entry, has_notes));
+    }
+
+    // What would be lost: entries replaced in the destination, pass notes dropped.
+    let mut replaced = Vec::new();
+    for (name, _, _) in &entries {
+        if stores.contains(to, name)? {
+            replaced.push(*name);
+        }
+    }
+    let losing_notes: Vec<&str> = entries
+        .iter()
+        .filter(|(_, _, has_notes)| *has_notes)
+        .map(|(name, _, _)| *name)
+        .collect();
+    let at_risk = !replaced.is_empty() || !losing_notes.is_empty();
+    let (verb, done) = if args.remove {
+        ("Move", "Moved")
+    } else {
+        ("Copy", "Copied")
+    };
+    let count = |n: usize| format!("{n} {}", if n == 1 { "entry" } else { "entries" });
+
+    if args.dry_run {
+        println!(
+            "{verb} {} from the {from} store to the {to} store:",
+            count(entries.len())
+        );
+        for (name, _, has_notes) in &entries {
+            let mut remarks = Vec::new();
+            if replaced.contains(name) {
+                remarks.push("replaces the existing entry");
+            }
+            if *has_notes {
+                remarks.push("its notes would be lost");
+            }
+            match remarks.is_empty() {
+                true => println!("  {name}"),
+                false => println!("  {name} ({})", remarks.join(", ")),
+            }
+        }
+        if at_risk && !args.overwrite {
+            println!("Without --overwrite, nothing would be migrated.");
+        }
+        return Ok(());
+    }
+    if at_risk && !args.overwrite {
+        let mut message = "nothing was migrated".to_string();
+        if !replaced.is_empty() {
+            message.push_str(&format!(
+                "\n  Already in the {to} store: {}",
+                replaced.join(", ")
+            ));
+        }
+        if !losing_notes.is_empty() {
+            message.push_str(&format!(
+                "\n  With notes the database cannot keep: {}",
+                losing_notes.join(", ")
+            ));
+        }
+        message.push_str("\n  Use --overwrite to go ahead anyway, or --dry-run to review.");
+        bail!(message);
+    }
+
+    for (index, (name, entry, _)) in entries.iter().enumerate() {
+        let written = {
+            let store = stores.get_or_create(to)?;
+            // Without --overwrite, fail if another process added the name meanwhile.
+            match args.overwrite {
+                true => store.put(name, entry),
+                false => store.insert(name, entry),
+            }
+        };
+        let progress = || {
+            format!(
+                "migrating {name}, after {} of {}",
+                count(index),
+                entries.len()
+            )
+        };
+        written.with_context(progress)?;
+        if args.remove {
+            let source = stores.get(from)?.expect("source store exists");
+            source.remove(name).with_context(progress)?;
+        }
+        eprintln!("{done} {name}");
+    }
+    eprintln!(
+        "{done} {} from the {from} store to the {to} store.",
+        count(entries.len())
+    );
+    if !args.remove {
+        let hotp: Vec<&str> = entries
+            .iter()
+            .filter(|(_, entry, _)| matches!(entry.otp.kind, Kind::Hotp { .. }))
+            .map(|(name, _, _)| *name)
+            .collect();
+        if !hotp.is_empty() {
+            eprintln!(
+                "Warning: these HOTP entries now exist in both stores with the same counter; \
+                 use only one copy, or codes will repeat: {}",
+                hotp.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 

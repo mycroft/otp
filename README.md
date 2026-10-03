@@ -90,6 +90,11 @@ otp list [PREFIX] [--long]  # entries from both stores (or --pass / --native)
 otp show NAME [--uri]       # parameters, or the otpauth:// URI (includes the secret)
 otp rm NAME [--force]
 otp mv FROM TO [--force]    # rename within its store; TO ending in / keeps the name
+
+# Copy entries to the other store (all, or those starting with PREFIX);
+# --remove moves them instead, --dry-run only shows what would happen
+otp migrate --to native [PREFIX] [--remove] [--dry-run]
+otp migrate --to pass [PREFIX] [--remove] [--dry-run]
 otp passwd                  # change the native database's master password
 ```
 
@@ -97,6 +102,12 @@ Lookups check pass first, since that doesn't need the master password, then the 
 database. `--pass` / `--native` restrict any command to one store; `backend = "pass"`
 or `backend = "database"` in the configuration makes that the default. With pass chosen
 that way, otp never opens the database, so it does not ask for its master password.
+
+`otp migrate` refuses, before changing anything, when an entry already exists in the
+destination or a pass entry has notes after its URI, which the database cannot keep;
+`--overwrite` replaces those entries and drops the notes. Entries keep their parameters,
+HOTP counter and dates. Copying (without `--remove`) leaves HOTP entries in both stores
+with the same counter: use only one copy, or codes will repeat.
 
 New names are kept unique across stores: `insert` and `mv` refuse a name the other
 store already has. The exception is that same pass-only case, where the database is not

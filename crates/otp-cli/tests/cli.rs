@@ -1565,3 +1565,162 @@ fn choosing_pass_never_opens_the_database() {
         .success()
         .stdout("pass    moved\npass    other2\nnative  shared\npass    shared\n");
 }
+
+/// Writes a plaintext entry for the fake pass.
+fn fake_pass_entry(env: &Env, name: &str, contents: &str) {
+    let path = env.pass_dir().join(format!("{name}-otp.gpg"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+fn listed(env: &Env) -> String {
+    let output = env.otp().args(["list", "--long"]).assert().success();
+    String::from_utf8(output.get_output().stdout.clone()).unwrap()
+}
+
+#[test]
+fn migrate_copies_pass_entries_to_a_new_database() {
+    let env = Env::new().with_fake_pass();
+    fake_pass_entry(&env, "web/a", &format!("{HOTP_URI}\n"));
+    fake_pass_entry(
+        &env,
+        "web/b",
+        "otpauth://totp/B:b?secret=JBSWY3DPEHPK3PXP\n{}\n",
+    );
+    fake_pass_entry(
+        &env,
+        "other",
+        "otpauth://totp/O:o?secret=JBSWY3DPEHPK3PXP\n",
+    );
+    assert!(!env.path("data/otp.db").exists());
+
+    env.otp()
+        .args(["migrate", "--to", "native", "web/"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Copied web/a"))
+        .stderr(predicate::str::contains(
+            "Copied 2 entries from the pass store to the native store.",
+        ))
+        .stderr(predicate::str::contains(
+            "HOTP entries now exist in both stores with the same counter; use only one \
+             copy, or codes will repeat: web/a",
+        ));
+    // Copied, with the prefix: pass keeps everything, the database gets web/ only.
+    assert_eq!(
+        listed(&env),
+        "pass    other\nnative  web/a\npass    web/a\nnative  web/b\npass    web/b\n"
+    );
+    env.otp()
+        .args(["--native", "web/a"])
+        .assert()
+        .success()
+        .stdout("755224\n");
+}
+
+#[test]
+fn migrate_moves_database_entries_to_pass() {
+    let env = Env::new().with_fake_pass();
+    env.insert_uri("bank", HOTP_URI);
+    env.insert_uri(
+        "web/github",
+        "otpauth://totp/GitHub:me?secret=JBSWY3DPEHPK3PXP",
+    );
+
+    env.otp()
+        .args(["migrate", "--to", "pass", "--remove"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Moved bank"))
+        .stderr(predicate::str::contains(
+            "Moved 2 entries from the native store to the pass store.",
+        ))
+        .stderr(predicate::str::contains("HOTP").not());
+    assert_eq!(listed(&env), "pass    bank\npass    web/github\n");
+    let stored = fs::read_to_string(env.pass_dir().join("bank-otp.gpg")).unwrap();
+    assert!(
+        stored.starts_with("otpauth://hotp/Example:alice@example.com?secret="),
+        "{stored}"
+    );
+    // The counter and metadata came along.
+    env.otp().arg("bank").assert().success().stdout("755224\n");
+    env.otp()
+        .args(["show", "bank"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("created:   20"));
+}
+
+#[test]
+fn migrate_refuses_to_overwrite_or_drop_notes_without_overwrite() {
+    let env = Env::new().with_fake_pass();
+    // `taken` is in both stores, with different secrets; `noted` has pass-otp notes.
+    env.insert_uri("taken", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP");
+    fake_pass_entry(&env, "taken", &format!("{HOTP_URI}\n"));
+    fake_pass_entry(&env, "noted", &format!("{HOTP_URI}\nrecovery: 1111 2222\n"));
+    fake_pass_entry(&env, "plain", &format!("{HOTP_URI}\n"));
+
+    env.otp()
+        .args(["migrate", "--to", "native"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing was migrated"))
+        .stderr(predicate::str::contains(
+            "Already in the native store: taken",
+        ))
+        .stderr(predicate::str::contains(
+            "With notes the database cannot keep: noted",
+        ))
+        .stderr(predicate::str::contains("--overwrite"));
+    assert_eq!(
+        listed(&env),
+        "pass    noted\npass    plain\nnative  taken\npass    taken\n"
+    );
+
+    // --dry-run reports the same, and changes nothing.
+    env.otp()
+        .args(["migrate", "--to", "native", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(
+            "Copy 3 entries from the pass store to the native store:\n  \
+             noted (its notes would be lost)\n  plain\n  \
+             taken (replaces the existing entry)\n\
+             Without --overwrite, nothing would be migrated.\n",
+        );
+    assert_eq!(
+        listed(&env),
+        "pass    noted\npass    plain\nnative  taken\npass    taken\n"
+    );
+
+    env.otp()
+        .args(["migrate", "--to", "native", "--overwrite", "--remove"])
+        .assert()
+        .success();
+    assert_eq!(
+        listed(&env),
+        "native  noted\nnative  plain\nnative  taken\n"
+    );
+    // `taken` was replaced by the pass version (HOTP).
+    env.otp().arg("taken").assert().success().stdout("755224\n");
+}
+
+#[test]
+fn migrate_with_nothing_to_do() {
+    let env = Env::new().with_fake_pass();
+    env.otp()
+        .args(["migrate", "--to", "pass"])
+        .assert()
+        .success()
+        .stderr("Nothing to migrate: no matching entries in the native store.\n");
+    fake_pass_entry(&env, "a", &format!("{HOTP_URI}\n"));
+    env.otp()
+        .args(["migrate", "--to", "database", "zzz"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Nothing to migrate"));
+    assert!(
+        !env.path("data/otp.db").exists(),
+        "no database created for nothing"
+    );
+}

@@ -256,16 +256,6 @@ fn duplicates_need_force() {
 #[test]
 fn names_must_be_unique_across_stores() {
     let env = Env::new();
-    env.insert_uri("shared", HOTP_URI);
-    env.otp()
-        .args(["insert", "--pass", "shared"])
-        .write_stdin(format!("{HOTP_URI}\n"))
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "already exists in the native store",
-        ));
-
     // An entry already in pass blocks a native insert (checked without decrypting).
     fs::write(env.pass_dir().join("in-pass-otp.gpg"), b"").unwrap();
     env.otp()
@@ -1526,4 +1516,52 @@ fn older_kdf_settings_still_open() {
         .success()
         .stdout("755224\n")
         .stderr("");
+}
+
+#[test]
+fn choosing_pass_never_opens_the_database() {
+    let env = Env::new().with_fake_pass();
+    env.insert_uri("shared", HOTP_URI);
+    // With this password, any attempt to open the database fails loudly.
+    let otp = || {
+        let mut cmd = env.otp();
+        cmd.env("OTP_PASSWORD", "wrong but long enough");
+        cmd
+    };
+    let insert = |args: &[&str]| {
+        let mut cmd = otp();
+        cmd.arg("insert")
+            .args(args)
+            .write_stdin(format!("{HOTP_URI}\n"));
+        cmd
+    };
+
+    // --pass goes straight to pass, even for a name the database also holds.
+    insert(&["--pass", "new"]).assert().success();
+    insert(&["--pass", "shared"]).assert().success();
+    otp()
+        .args(["mv", "--pass", "new", "moved"])
+        .assert()
+        .success();
+
+    // So does `backend = "pass"`...
+    env.write_config("backend = \"pass\"\n");
+    insert(&["other"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("into the pass store"));
+    otp().args(["mv", "other", "other2"]).assert().success();
+    // ...unless --native asks for the database.
+    insert(&["--native", "native2"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong master password"));
+
+    // Both copies of `shared` exist: lookups find the pass one first.
+    env.write_config("");
+    env.otp()
+        .args(["list", "--long"])
+        .assert()
+        .success()
+        .stdout("pass    moved\npass    other2\nnative  shared\npass    shared\n");
 }

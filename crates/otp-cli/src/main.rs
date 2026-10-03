@@ -375,7 +375,8 @@ fn insert(stores: &mut Stores, config: &Config, args: InsertArgs) -> Result<()> 
         _ => config.backend().unwrap_or(Backend::Native),
     };
     // Check for conflicts before asking for the secret.
-    check_available(stores, target, name, args.force)?;
+    // The target is pass only when chosen: --pass, or `backend = "pass"` without --native.
+    check_available(stores, target, name, args.force, target == Backend::Pass)?;
 
     let mut otp = read_otp(config, &args)?;
     if args.issuer.is_some() {
@@ -400,12 +401,22 @@ fn insert(stores: &mut Stores, config: &Config, args: InsertArgs) -> Result<()> 
 
 /// Checks that `name` can be written to `backend`: names are unique across stores, and
 /// an existing entry in `backend` is only replaced with `force`.
-fn check_available(stores: &mut Stores, backend: Backend, name: &str, force: bool) -> Result<()> {
+///
+/// With `pass_only` (`--pass`, or `backend = "pass"` without `--native`), the database is
+/// left alone: checking it would mean asking for its master password.
+fn check_available(
+    stores: &mut Stores,
+    backend: Backend,
+    name: &str,
+    force: bool,
+    pass_only: bool,
+) -> Result<()> {
     let other = match backend {
         Backend::Pass => Backend::Native,
         Backend::Native => Backend::Pass,
     };
-    if stores.contains(other, name)? {
+    let skip_other = pass_only && other == Backend::Native;
+    if !skip_other && stores.contains(other, name)? {
         bail!("{name} already exists in the {other} store; remove it first");
     }
     if stores.contains(backend, name)? && !force {
@@ -566,7 +577,7 @@ fn move_entry(
         bail!("{from} is already named {to}");
     }
     let backend = stores.locate(from, only)?;
-    check_available(stores, backend, &to, force)?;
+    check_available(stores, backend, &to, force, only == Some(Backend::Pass))?;
     let store = stores.get(backend)?.expect("located store exists");
     store.rename(from, &to, force)?;
     eprintln!("Moved {from} to {to} in the {backend} store.");

@@ -162,13 +162,15 @@ fn fetch(stores: &mut Stores, name: &str, backend: Backend) -> Result<Entry> {
 }
 
 /// Checks that a new entry can be named `name`: names are unique across stores. Never
-/// prompts for the master password (see [`Stores::contains_quietly`]).
+/// prompts for the master password (see [`Stores::contains_quietly`]). New entries only
+/// go to pass when it was chosen (`--pass`, `backend = "pass"`), and then the database is
+/// left alone, as `otp insert` does.
 fn check_name(stores: &mut Stores, target: Backend, name: &str) -> Result<()> {
     let other = match target {
         Backend::Pass => Backend::Native,
         Backend::Native => Backend::Pass,
     };
-    if stores.contains_quietly(other, name)? {
+    if other == Backend::Pass && stores.contains_quietly(other, name)? {
         bail!("{name} already exists in the {other} store");
     }
     if stores.contains_quietly(target, name)? {

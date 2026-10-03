@@ -93,10 +93,14 @@ otp mv FROM TO [--force]    # rename within its store; TO ending in / keeps the 
 otp passwd                  # change the native database's master password
 ```
 
-A name can only exist in one store. Lookups check pass first, since that doesn't need
-the master password, then the native database. `--pass` / `--native` restrict any
-command to one store; `backend = "pass"` or `backend = "database"` in the
-configuration makes that the default.
+Lookups check pass first, since that doesn't need the master password, then the native
+database. `--pass` / `--native` restrict any command to one store; `backend = "pass"`
+or `backend = "database"` in the configuration makes that the default. With pass chosen
+that way, otp never opens the database, so it does not ask for its master password.
+
+New names are kept unique across stores: `insert` and `mv` refuse a name the other
+store already has. The exception is that same pass-only case, where the database is not
+checked: an entry may then exist in both, and lookups find the pass one first.
 
 ## TUI
 

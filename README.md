@@ -120,9 +120,9 @@ with `--pass` / `--native`:
 
 - Type to filter the list: case-insensitive substring match; Backspace edits, Ctrl-U
   clears.
-- ↑/↓ select an entry. Its code, time left, issuer and account show
-  in the right-hand column. pass entries are decrypted the first time they are
-  selected.
+- ↑/↓ select an entry, PgUp/PgDn move a page at a time, and Home/End go to the first
+  and last entry. Its code, time left, issuer and account show in the right-hand
+  column. pass entries are decrypted the first time they are selected.
 - Enter copies the selected code with `clipboard_command` and quits. HOTP codes are
   only generated here, since generating one advances the counter. Esc or Ctrl-C quits.
 - Tab or Ctrl-I opens the inspect window. It shows the current code, the base32 secret,

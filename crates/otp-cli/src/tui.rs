@@ -261,6 +261,8 @@ pub struct App {
     /// Indices into `rows` matching the filter.
     visible: Vec<usize>,
     list: ListState,
+    /// How many entries the list showed when last drawn: what PgUp/PgDn move by.
+    page: usize,
     /// Decrypted entries (or the error), by index into `rows`.
     loaded: HashMap<usize, Result<Entry, String>>,
     /// Where new entries are stored.
@@ -283,6 +285,7 @@ impl App {
             filter: String::new(),
             visible: Vec::new(),
             list: ListState::default(),
+            page: 1,
             loaded: HashMap::new(),
             target: Backend::Native,
             new: None,
@@ -318,6 +321,17 @@ impl App {
             let next = current.saturating_add_signed(delta).min(last);
             self.list.select(Some(next));
         }
+    }
+
+    /// Moves the selection a page up (-1) or down (1), scrolling the list along so the
+    /// selection keeps its row on screen.
+    fn move_page(&mut self, direction: isize) {
+        let delta = self.page as isize * direction;
+        // Scroll without leaving blank rows past the last entry.
+        let last_offset = self.visible.len().saturating_sub(self.page);
+        let offset = self.list.offset().saturating_add_signed(delta);
+        *self.list.offset_mut() = offset.min(last_offset);
+        self.move_selection(delta);
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -405,6 +419,11 @@ impl App {
             }
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
+            KeyCode::PageUp => self.move_page(-1),
+            KeyCode::PageDown => self.move_page(1),
+            // Saturates at the first and last entry.
+            KeyCode::Home => self.move_selection(isize::MIN),
+            KeyCode::End => self.move_selection(isize::MAX),
             KeyCode::Backspace => {
                 self.filter.pop();
                 self.refilter();
@@ -680,6 +699,7 @@ impl App {
     fn render_entries(&mut self, frame: &mut Frame, area: Rect) {
         let title = format!(" Entries {}/{} ", self.visible.len(), self.rows.len());
         let block = Block::bordered().title(title);
+        self.page = usize::from(block.inner(area).height).max(1);
         if self.visible.is_empty() {
             let message = if self.rows.is_empty() {
                 "No entries yet: Ctrl-N creates one"
@@ -1018,8 +1038,9 @@ fn render_message(frame: &mut Frame, message: &str) {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("↑", "previous entry"),
-    ("↓", "next entry"),
+    ("↑ / ↓", "previous / next entry"),
+    ("PgUp / PgDn", "previous / next page of entries"),
+    ("Home / End", "first / last entry"),
     ("typing", "filter entries (case-insensitive)"),
     ("Backspace", "delete the last filter character"),
     ("Ctrl-U", "clear the filter"),
@@ -1184,6 +1205,48 @@ mod tests {
         assert_eq!(app.selected(), Some(0));
         type_text(&mut app, "zzz");
         assert_eq!(app.selected(), None);
+    }
+
+    #[test]
+    fn page_home_and_end_keys_scroll_the_list() {
+        let names: Vec<String> = (0..20).map(|i| format!("entry{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = app(&names);
+        // 12 rows: 7 entries fit in the list.
+        render(&mut app, SystemTime::now());
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected(), Some(8));
+        // The list scrolls along: the selection stays on the second row.
+        let screen = render(&mut app, SystemTime::now());
+        assert!(screen.contains("│  entry07"), "{screen}");
+        assert!(screen.contains("> entry08"), "{screen}");
+        assert!(!screen.contains("entry06"), "{screen}");
+
+        app.handle_key(key(KeyCode::PageDown));
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected(), Some(19), "stops at the bottom");
+        // The last page is full, not scrolled past the end.
+        let screen = render(&mut app, SystemTime::now());
+        assert!(screen.contains("│  entry13"), "{screen}");
+        assert!(screen.contains("> entry19"), "{screen}");
+
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected(), Some(12));
+        app.handle_key(key(KeyCode::PageUp));
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected(), Some(0), "stops at the top");
+        assert!(render(&mut app, SystemTime::now()).contains("> entry00"));
+
+        // Home and End jump to the ends, End showing a full last page.
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected(), Some(19));
+        let screen = render(&mut app, SystemTime::now());
+        assert!(screen.contains("│  entry13"), "{screen}");
+        assert!(screen.contains("> entry19"), "{screen}");
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.selected(), Some(0));
+        assert!(render(&mut app, SystemTime::now()).contains("> entry00"));
     }
 
     #[test]

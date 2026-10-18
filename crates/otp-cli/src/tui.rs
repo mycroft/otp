@@ -53,6 +53,8 @@ pub fn run(
     app.hide_code = hidden;
     app.hide_after =
         (config.tui.hide_after > 0).then(|| Duration::from_secs(config.tui.hide_after));
+    app.quit_after =
+        (config.tui.quit_after > 0).then(|| Duration::from_secs(config.tui.quit_after));
     // Like `otp insert`: --pass/--native, then the `backend` setting, then native.
     app.target = only.unwrap_or(Backend::Native);
     let mut terminal = ratatui::try_init().context("cannot start the TUI")?;
@@ -86,7 +88,9 @@ fn event_loop(
         terminal.draw(|frame| app.render(frame, SystemTime::now()))?;
         // Wake up regularly so TOTP codes and countdowns stay current.
         if !event::poll(Duration::from_millis(250))? {
-            app.check_idle(Instant::now());
+            if app.check_idle(Instant::now()) {
+                bail!("quit after {} s without a key press", config.tui.quit_after);
+            }
             continue;
         }
         // Drain pending input before decrypting anything, so key repeat stays responsive.
@@ -256,6 +260,8 @@ pub struct App {
     group_digits: bool,
     /// Switch to hidden mode after this long without a key press (`[tui] hide_after`).
     hide_after: Option<Duration>,
+    /// Quit after this long without a key press (`[tui] quit_after`).
+    quit_after: Option<Duration>,
     last_key: Instant,
     filter: String,
     /// Indices into `rows` matching the filter.
@@ -281,6 +287,7 @@ impl App {
             hide_code: false,
             group_digits: false,
             hide_after: None,
+            quit_after: None,
             last_key: Instant::now(),
             filter: String::new(),
             visible: Vec::new(),
@@ -593,13 +600,19 @@ impl App {
     }
 
     /// Switches to hidden mode once `hide_after` has passed since the last key press, and
-    /// closes the QR code window, which shows the secret in scannable form.
-    pub fn check_idle(&mut self, now: Instant) {
+    /// closes the QR code window, which shows the secret in scannable form. Returns whether
+    /// `quit_after` has passed: hiding only masks the screen, quitting also drops the
+    /// decrypted entries.
+    pub fn check_idle(&mut self, now: Instant) -> bool {
+        let idle = now.saturating_duration_since(self.last_key);
+        if self.quit_after.is_some_and(|quit_after| idle >= quit_after) {
+            return true;
+        }
         let Some(hide_after) = self.hide_after else {
-            return;
+            return false;
         };
-        if now.saturating_duration_since(self.last_key) < hide_after {
-            return;
+        if idle < hide_after {
+            return false;
         }
         if self.mode == Mode::QrCode {
             self.mode = self.qr_return;
@@ -611,6 +624,7 @@ impl App {
                 hide_after.as_secs()
             ));
         }
+        false
     }
 
     /// `value`, or as many bullets when codes and secrets are hidden (Ctrl-H).
@@ -1725,6 +1739,32 @@ mod tests {
         app.hide_after = None;
         app.check_idle(app.last_key + Duration::from_secs(3600));
         assert!(!app.hide_code);
+    }
+
+    #[test]
+    fn idle_tui_quits() {
+        let mut app = app(&["a"]);
+        app.load_selected(&mut |_, _| Ok(totp_entry()));
+        app.hide_after = Some(Duration::from_secs(30));
+        app.quit_after = Some(Duration::from_secs(300));
+        let start = app.last_key;
+
+        assert!(!app.check_idle(start + Duration::from_secs(299)));
+        assert!(app.hide_code, "hidden before quitting");
+        assert!(app.check_idle(start + Duration::from_secs(300)));
+
+        // A key press restarts the delay.
+        app.handle_key(key(KeyCode::Down));
+        let pressed = app.last_key;
+        assert!(!app.check_idle(pressed + Duration::from_secs(299)));
+        assert!(app.check_idle(pressed + Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn idle_quitting_can_be_disabled() {
+        let mut app = app(&["a"]);
+        app.quit_after = None;
+        assert!(!app.check_idle(app.last_key + Duration::from_secs(86400)));
     }
 
     #[test]

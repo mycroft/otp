@@ -847,7 +847,7 @@ fn qrcode_needs_an_exact_entry() {
 fn tui_section_is_accepted_and_validated() {
     // Valid in every build, with or without the `tui` feature.
     let env = Env::new();
-    env.write_config("[tui]\ngroup_digits = true\nhidden = true\nhide_after = 0\n");
+    env.write_config("[tui]\ngroup_digits = true\nhidden = true\nhide_after = 0\nquit_after = 0\n");
     env.otp().arg("list").assert().success();
     env.write_config("[tui]\ngroup_digit = true\n");
     env.otp()

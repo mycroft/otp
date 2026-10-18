@@ -64,3 +64,6 @@ hidden = false
 # Switch to hidden mode after this many seconds without a key press (the QR code
 # window is closed too). 0 never does.
 hide_after = 30
+# Quit after this many seconds without a key press, so the decrypted entries do
+# not stay in memory. 0 never does.
+quit_after = 300

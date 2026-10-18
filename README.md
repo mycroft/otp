@@ -141,6 +141,8 @@ with `--pass` / `--native`:
   To start hidden, run `otp tui --hidden` or set `hidden = true` under `[tui]`. After
   30 seconds without a key press the TUI switches to hidden mode by itself, and closes
   the QR code window; set `hide_after` under `[tui]` to change the delay (0 disables it).
+  After 5 minutes without a key press it quits, so the decrypted entries do not stay in
+  memory; set `quit_after` to change that delay (0 disables it).
 - Ctrl-?, Ctrl-/ or F1 shows the help with all shortcuts; Esc closes it.
 
 Most terminals send Ctrl-I as Tab and Ctrl-? as Backspace. otp turns on the kitty
@@ -212,6 +214,7 @@ password_store_dir = "~/.password-store"
 group_digits = false      # true: show codes as "123 456" instead of "123456"
 hidden = false            # true: start with codes hidden (like Ctrl-H, or --hidden)
 hide_after = 30           # seconds without a key press before hiding them; 0 never
+quit_after = 300          # seconds without a key press before quitting; 0 never
 ```
 
 Environment variables:

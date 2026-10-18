@@ -53,6 +53,9 @@ pub struct TuiConfig {
     pub hidden: bool,
     /// Switch to hidden mode after this many seconds without a key press. 0 never does.
     pub hide_after: u64,
+    /// Quit after this many seconds without a key press, so decrypted entries do not stay
+    /// in memory. 0 never does.
+    pub quit_after: u64,
 }
 
 impl Default for TuiConfig {
@@ -61,6 +64,7 @@ impl Default for TuiConfig {
             group_digits: false,
             hidden: false,
             hide_after: 30,
+            quit_after: 300,
         }
     }
 }
